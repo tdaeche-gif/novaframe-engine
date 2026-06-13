@@ -1,0 +1,14 @@
+{
+  "theme_id": "mercator-classic",
+  "version": "1.0.0",
+  "display_name": "Classic Mercator",
+  "author": "System",
+  "assets": {
+    "background_image": "world-map-mercator.jpg"
+  },
+  "settings": {
+    "shadow_color": "#000000",
+    "shadow_opacity": 0.5,
+    "show_analemma": true
+  }
+}
