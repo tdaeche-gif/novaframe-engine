@@ -97,6 +97,11 @@ fn main() {
                 let _ = window.set_ignore_cursor_events(true);
                 let _ = window.set_desktop_underlay(true);
 
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = window.set_background_color(Some(tauri::Color(0, 0, 0, 0)));
+                }
+
                 #[cfg(target_os = "macos")]
                 {
                     let main_window_clone = window.clone();

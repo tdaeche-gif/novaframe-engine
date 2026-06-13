@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "geochronclock",
+  "productName": "Geochron",
   "version": "0.1.0",
-  "identifier": "com.tdaeche.geochronclock",
+  "identifier": "com.geochron.desktop.wallpaper",
   "build": {
     "frontendDist": "../src"
   },

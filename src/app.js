@@ -1,6 +1,72 @@
-// ─── Geochron Screensaver Engine (Audited & Repaired) ─────────────────────
+// Helper to resolve the themes directory path in AppData dynamically
+async function getThemesDir() {
+    if (window.__TAURI__ && window.__TAURI__.path) {
+        try {
+            let appData = await window.__TAURI__.path.appDataDir();
+            if (appData.endsWith('/') || appData.endsWith('\\')) {
+                appData = appData.slice(0, -1);
+            }
+            return `${appData}/themes`;
+        } catch (e) {
+            console.error("[Geochron] Failed to get appDataDir, falling back to local themes:", e);
+        }
+    }
+    return 'themes';
+}
 
-// ─── Geochron Screensaver Engine (Audited & Repaired) ─────────────────────
+// Check and provision default theme inside system AppData on startup
+async function verifyAndProvisionAppData() {
+    const tauriFs = window.__TAURI_PLUGIN_FS__ || (window.__TAURI__ && window.__TAURI__.fs);
+    if (!tauriFs) return;
+
+    try {
+        const baseDir = tauriFs.BaseDirectory;
+        const appData = baseDir.AppData;
+
+        // Check if themes/mercator-classic exists in AppData
+        const hasTheme = await tauriFs.exists("themes/mercator-classic", { baseDir: appData });
+        if (!hasTheme) {
+            console.log("[Geochron] Provisioning default theme to AppData...");
+            
+            // Create target folders recursively
+            await tauriFs.mkdir("themes/mercator-classic", { baseDir: appData, recursive: true });
+            
+            // Fetch default manifest.json from local build folder assets
+            const manifestRes = await fetch("themes/mercator-classic/manifest.json");
+            if (!manifestRes.ok) throw new Error("manifest.json not found in bundle");
+            const manifestText = await manifestRes.text();
+            
+            // Write manifest.json to AppData
+            await tauriFs.writeTextFile("themes/mercator-classic/manifest.json", manifestText, { baseDir: appData });
+            
+            // Fetch default map image
+            const mapRes = await fetch("themes/mercator-classic/world-map-mercator.jpg");
+            if (!mapRes.ok) throw new Error("world-map-mercator.jpg not found in bundle");
+            const mapBuf = await mapRes.arrayBuffer();
+            
+            // Write map image to AppData
+            await tauriFs.writeFile("themes/mercator-classic/world-map-mercator.jpg", new Uint8Array(mapBuf), { baseDir: appData });
+            
+            console.log("[Geochron] Default theme provisioned successfully in AppData.");
+        }
+    } catch (err) {
+        console.error("[Geochron] Failed to provision default theme in AppData:", err);
+    }
+}
+
+// Set ignore cursor events safely by checking label boundaries
+async function setIgnoreCursor(ignore) {
+    if (window.__TAURI__ && window.__TAURI__.window) {
+        try {
+            const win = window.__TAURI__.window.getCurrentWindow();
+            if (win.label === 'main') {
+                await win.setIgnoreCursorEvents(ignore);
+            }
+        } catch (e) {
+            console.error("[Geochron] Failed to set ignore cursor events:", e);
+        }
+    }
+}
 
 function initDualWindowSystem() {
     const params = new URLSearchParams(window.location.search);
@@ -8,6 +74,8 @@ function initDualWindowSystem() {
 
     if (mode === 'main') {
         document.getElementById('settingsPanel').style.display = 'none';
+
+        setIgnoreCursor(true);
 
         ConfigManager.init().then(async () => {
             const savedTheme = await ConfigManager.getTheme();
@@ -39,16 +107,33 @@ function initDualWindowSystem() {
             window.addEventListener('mousedown', notifyActive);
             window.addEventListener('keydown', notifyActive);
 
-            panel.addEventListener('mouseenter', async () => {
-                try { await window.__TAURI__.core.invoke('expand_settings_panel'); } catch (e) { console.error(e); }
-                notifyActive();
+            let debounceTimeout = null;
+            let targetState = null;
+
+            const debounceAction = (state, actionFn) => {
+                targetState = state;
+                if (debounceTimeout) clearTimeout(debounceTimeout);
+                debounceTimeout = setTimeout(async () => {
+                    if (targetState === state) {
+                        await actionFn();
+                    }
+                }, 16);
+            };
+
+            panel.addEventListener('mouseenter', () => {
+                debounceAction('expanded', async () => {
+                    try { await window.__TAURI__.core.invoke('expand_settings_panel'); } catch (e) { console.error(e); }
+                    notifyActive();
+                });
             });
 
-            panel.addEventListener('mouseleave', async () => {
-                try { await window.__TAURI__.core.invoke('collapse_settings_panel'); } catch (e) { console.error(e); }
-                if (window.__TAURI__ && window.__TAURI__.event) {
-                    window.__TAURI__.event.emit('settings-active', false);
-                }
+            panel.addEventListener('mouseleave', () => {
+                debounceAction('collapsed', async () => {
+                    try { await window.__TAURI__.core.invoke('collapse_settings_panel'); } catch (e) { console.error(e); }
+                    if (window.__TAURI__ && window.__TAURI__.event) {
+                        window.__TAURI__.event.emit('settings-active', false);
+                    }
+                });
             });
         }
     }
@@ -318,8 +403,19 @@ const ConfigManager = {
         if (this.store) {
             await this.store.set('geochron_config', config);
             await this.store.save();
-        } else {
-            localStorage.setItem('geochron_config', JSON.stringify(config));
+        }
+        localStorage.setItem('geochron_config', JSON.stringify(config));
+
+        if (window.__TAURI__ && window.__TAURI__.event) {
+            try {
+                if (window.__TAURI__.event.emitTo) {
+                    await window.__TAURI__.event.emitTo('main', 'config-changed', config);
+                } else {
+                    await window.__TAURI__.event.emit('config-changed', config);
+                }
+            } catch (e) {
+                console.error("[Geochron] Config emit failed:", e);
+            }
         }
     },
     async getTheme() {
@@ -332,9 +428,23 @@ const ConfigManager = {
             if (themePath) await this.store.set('activeTheme', themePath);
             else await this.store.delete('activeTheme');
             await this.store.save();
+        }
+        if (themePath) {
+            localStorage.setItem('activeTheme', themePath);
         } else {
-            if (themePath) localStorage.setItem('activeTheme', themePath);
-            else localStorage.removeItem('activeTheme');
+            localStorage.removeItem('activeTheme');
+        }
+
+        if (window.__TAURI__ && window.__TAURI__.event) {
+            try {
+                if (window.__TAURI__.event.emitTo) {
+                    await window.__TAURI__.event.emitTo('main', 'theme-changed', themePath);
+                } else {
+                    await window.__TAURI__.event.emit('theme-changed', themePath);
+                }
+            } catch (e) {
+                console.error("[Geochron] Theme emit failed:", e);
+            }
         }
     }
 };
@@ -484,15 +594,13 @@ async function scanThemes() {
     if (!tauriFs) return;
     
     try {
-        const basePath = "/Users/TDaeche/GeochronClock/themes";
-        const entries = await tauriFs.readDir(basePath);
+        const themesDir = await getThemesDir();
+        const entries = await tauriFs.readDir(themesDir);
         
         for (const entry of entries) {
             if (entry.isDirectory) {
-                const themePath = `${basePath}/${entry.name}`;
+                const themePath = `${themesDir}/${entry.name}`;
                 try {
-                    // Try to read manifest manually or via loadTheme check
-                    // For UI, we assume any folder in themes/ is a theme.
                     const option = document.createElement('option');
                     option.value = themePath;
                     option.textContent = entry.name;
@@ -517,12 +625,45 @@ async function scanThemes() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+    // Standalone Storage Fallback listener (cross-origin browser support)
+    window.addEventListener('storage', (e) => {
+        if (e.key === 'activeTheme') {
+            const newTheme = e.newValue || null;
+            if (newTheme !== ThemeManager.currentThemePath) {
+                ThemeManager.currentThemePath = newTheme;
+                ThemeManager.loadTheme(newTheme);
+            }
+        } else if (e.key === 'geochron_config') {
+            try {
+                if (e.newValue) {
+                    config = JSON.parse(e.newValue);
+                }
+            } catch (err) {}
+        }
+    });
+
     if (window.__TAURI__) {
+        await verifyAndProvisionAppData();
         await ConfigManager.init();
         initDualWindowSystem();
         initSettingsUI();
 
         if (window.__TAURI__.event) {
+            // Inter-window event triggers
+            window.__TAURI__.event.listen('theme-changed', (event) => {
+                const newTheme = event.payload || null;
+                if (newTheme !== ThemeManager.currentThemePath) {
+                    ThemeManager.currentThemePath = newTheme;
+                    ThemeManager.loadTheme(newTheme);
+                }
+            });
+
+            window.__TAURI__.event.listen('config-changed', (event) => {
+                if (event.payload) {
+                    config = event.payload;
+                }
+            });
+
             window.__TAURI__.event.listen('occlusion-change', (event) => {
                 const isVisible = event.payload;
                 isWindowOccluded = !isVisible;

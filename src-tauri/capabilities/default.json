@@ -9,16 +9,36 @@
     "fs:default",
     "store:default",
     {
-      "identifier": "fs:allow-read-file",
-      "allow": [{ "path": "/Users/TDaeche/GeochronClock/themes/**" }]
+      "identifier": "fs:allow-read-dir",
+      "allow": [
+        { "path": "$APPDATA" },
+        { "path": "$APPDATA/themes" }
+      ]
     },
     {
-      "identifier": "fs:allow-read-dir",
-      "allow": [{ "path": "/Users/TDaeche/GeochronClock/themes" }]
+      "identifier": "fs:allow-read-file",
+      "allow": [
+        { "path": "$APPDATA/themes/**" }
+      ]
     },
     {
       "identifier": "fs:allow-exists",
-      "allow": [{ "path": "/Users/TDaeche/GeochronClock/themes/**" }]
+      "allow": [
+        { "path": "$APPDATA/themes/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-write-file",
+      "allow": [
+        { "path": "$APPDATA/themes/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-mkdir",
+      "allow": [
+        { "path": "$APPDATA/themes" },
+        { "path": "$APPDATA/themes/**" }
+      ]
     }
   ]
 }
