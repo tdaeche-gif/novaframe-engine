@@ -162,8 +162,22 @@ fn main() {
                                         was_hovered = is_hovered;
                                         if is_hovered {
                                             expand_settings_panel(settings_clone.clone());
+                                            let window_for_closure = settings_clone.clone();
+                                            let _ = settings_clone.run_on_main_thread(move || {
+                                                if let Ok(ns_window_ptr) = window_for_closure.ns_window() {
+                                                    let ns_window = ns_window_ptr as *mut objc2::runtime::AnyObject;
+                                                    let _: () = objc2::msg_send![ns_window, setLevel: 3isize];
+                                                }
+                                            });
                                         } else {
                                             collapse_settings_panel(settings_clone.clone());
+                                            let window_for_closure = settings_clone.clone();
+                                            let _ = settings_clone.run_on_main_thread(move || {
+                                                if let Ok(ns_window_ptr) = window_for_closure.ns_window() {
+                                                    let ns_window = ns_window_ptr as *mut objc2::runtime::AnyObject;
+                                                    let _: () = objc2::msg_send![ns_window, setLevel: 3isize];
+                                                }
+                                            });
                                         }
                                     }
                                 }
