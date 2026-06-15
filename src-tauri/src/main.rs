@@ -11,7 +11,7 @@ use objc2_foundation::{NSPoint, NSRect};
 fn expand_settings_panel(window: tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         let scale_factor = monitor.scale_factor();
-        let logical_height = 460.0;
+        let logical_height = 600.0;
         let monitor_h = monitor.size().height as f64 / scale_factor;
         let logical_x = (monitor.position().x as f64 / scale_factor) + (monitor.size().width as f64 / scale_factor) - 275.0;
         let logical_y = (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
@@ -59,7 +59,7 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
                 };
                 let target_width = if current_width > 150.0 { 275.0 } else { 40.0 };
                 let logical_width = monitor.size().width as f64 / scale_factor;
-                let logical_height = if current_width > 150.0 { 460.0 } else { 40.0 };
+                let logical_height = if current_width > 150.0 { 600.0 } else { 40.0 };
                 let monitor_h = monitor.size().height as f64 / scale_factor;
                 let logical_x = (monitor.position().x as f64 / scale_factor) + logical_width - target_width;
                 let logical_y = (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;

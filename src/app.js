@@ -590,7 +590,10 @@ function initSettingsUI() {
             const item = document.createElement('div');
             item.className = 'pin-item';
             item.innerHTML = `
-                <span><strong>${loc.name}</strong> (${loc.lat.toFixed(1)}°, ${loc.lon.toFixed(1)}°)</span>
+                <div class="pin-info">
+                    <span class="pin-name">${loc.name}</span>
+                    <span class="pin-coords">${loc.lat.toFixed(1)}°, ${loc.lon.toFixed(1)}°</span>
+                </div>
                 <button class="delete-btn" data-index="${index}">&times;</button>
             `;
             pinsList.appendChild(item);
