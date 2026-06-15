@@ -8,11 +8,12 @@ use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
 fn expand_settings_panel(window: tauri::Window) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         let scale_factor = monitor.scale_factor();
-        let logical_height = monitor.size().height as f64 / scale_factor;
-        let logical_x = (monitor.position().x as f64 / scale_factor) + (monitor.size().width as f64 / scale_factor) - 300.0;
-        let logical_y = monitor.position().y as f64 / scale_factor;
+        let logical_height = 460.0;
+        let monitor_h = monitor.size().height as f64 / scale_factor;
+        let logical_x = (monitor.position().x as f64 / scale_factor) + (monitor.size().width as f64 / scale_factor) - 275.0;
+        let logical_y = (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
         
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(300.0, logical_height)));
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(275.0, logical_height)));
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(logical_x, logical_y)));
     }
 }
@@ -21,11 +22,13 @@ fn expand_settings_panel(window: tauri::Window) {
 fn collapse_settings_panel(window: tauri::Window) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         let scale_factor = monitor.scale_factor();
-        let logical_height = monitor.size().height as f64 / scale_factor;
-        let logical_x = (monitor.position().x as f64 / scale_factor) + (monitor.size().width as f64 / scale_factor) - 30.0;
-        let logical_y = monitor.position().y as f64 / scale_factor;
+        let logical_height = 40.0;
+        let logical_width = 40.0;
+        let monitor_h = monitor.size().height as f64 / scale_factor;
+        let logical_x = (monitor.position().x as f64 / scale_factor) + (monitor.size().width as f64 / scale_factor) - logical_width;
+        let logical_y = (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
         
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(30.0, logical_height)));
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(logical_width, logical_height)));
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(logical_x, logical_y)));
     }
 }
@@ -49,13 +52,14 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
                 let current_width = if let Ok(size) = settings_window.inner_size() {
                     size.to_logical::<f64>(scale_factor).width
                 } else {
-                    30.0
+                    25.0
                 };
-                let target_width = if current_width > 150.0 { 300.0 } else { 30.0 };
+                let target_width = if current_width > 150.0 { 275.0 } else { 40.0 };
                 let logical_width = monitor.size().width as f64 / scale_factor;
-                let logical_height = monitor.size().height as f64 / scale_factor;
+                let logical_height = if current_width > 150.0 { 460.0 } else { 40.0 };
+                let monitor_h = monitor.size().height as f64 / scale_factor;
                 let logical_x = (monitor.position().x as f64 / scale_factor) + logical_width - target_width;
-                let logical_y = monitor.position().y as f64 / scale_factor;
+                let logical_y = (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
                 
                 let _ = settings_window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(target_width, logical_height)));
                 let _ = settings_window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(logical_x, logical_y)));

@@ -344,6 +344,7 @@ const DRAW_INTERVAL = 1000;            // Base fallback frame throttle (1 FPS)
 // ── State Persistence Configurations (ConfigManager) ───────────────────────
 const DEFAULT_CONFIG = {
     shadowOpacity: 55,
+    showAnalemma: true,
     pinnedLocations: [
         { name: "London", lat: 51.5074, lon: -0.1278 },
         { name: "New York", lat: 40.7128, lon: -74.0060 },
@@ -522,6 +523,16 @@ function initSettingsUI() {
         config.shadowOpacity = parseInt(e.target.value);
         ConfigManager.saveConfig();
     });
+    
+    // Analemma toggle listener
+    const analemmaToggle = document.getElementById('analemmaToggle');
+    if (analemmaToggle) {
+        analemmaToggle.checked = config.showAnalemma !== false;
+        analemmaToggle.addEventListener('change', (e) => {
+            config.showAnalemma = e.target.checked;
+            ConfigManager.saveConfig();
+        });
+    }
     
     // Add location function
     addPinBtn.addEventListener('click', () => {
@@ -866,6 +877,8 @@ function drawLocationPins(mapW, mapH, rafTime) {
 // Initialization is now properly awaited in DOMContentLoaded via ConfigManager.init()
 
 function drawSolarAnalemma(mapW, mapH, currentSubsolar) {
+    if (config.showAnalemma === false) return; // Feature toggle
+
     ctx.save(); //
     ctx.strokeStyle = ThemeManager.currentTheme.equatorColor; //
     ctx.setLineDash([2, 4]); //
