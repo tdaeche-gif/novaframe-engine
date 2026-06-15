@@ -4,8 +4,11 @@
 use tauri::{Manager, Emitter};
 use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
 
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSPoint, NSRect};
+
 #[tauri::command]
-fn expand_settings_panel(window: tauri::Window) {
+fn expand_settings_panel(window: tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         let scale_factor = monitor.scale_factor();
         let logical_height = 460.0;
@@ -19,7 +22,7 @@ fn expand_settings_panel(window: tauri::Window) {
 }
 
 #[tauri::command]
-fn collapse_settings_panel(window: tauri::Window) {
+fn collapse_settings_panel(window: tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         let scale_factor = monitor.scale_factor();
         let logical_height = 40.0;
@@ -131,6 +134,45 @@ fn main() {
                     });
                 }
             }
+
+            if let Some(settings_window) = app.get_webview_window("settings") {
+                #[cfg(target_os = "macos")]
+                {
+                    let settings_clone = settings_window.clone();
+                    std::thread::spawn(move || {
+                        let mut was_hovered = false;
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            if let Ok(ns_window_ptr) = settings_clone.ns_window() {
+                                if ns_window_ptr.is_null() {
+                                    continue;
+                                }
+                                unsafe {
+                                    let ns_window = ns_window_ptr as *mut objc2::runtime::AnyObject;
+                                    let ns_event_class = objc2::class!(NSEvent);
+                                    let mouse_loc: NSPoint = objc2::msg_send![ns_event_class, mouseLocation];
+                                    let frame: NSRect = objc2::msg_send![ns_window, frame];
+                                    
+                                    let is_hovered = mouse_loc.x >= frame.origin.x &&
+                                                     mouse_loc.x <= frame.origin.x + frame.size.width &&
+                                                     mouse_loc.y >= frame.origin.y &&
+                                                     mouse_loc.y <= frame.origin.y + frame.size.height;
+                                                     
+                                    if is_hovered != was_hovered {
+                                        was_hovered = is_hovered;
+                                        if is_hovered {
+                                            expand_settings_panel(settings_clone.clone());
+                                        } else {
+                                            collapse_settings_panel(settings_clone.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, log_from_js])
