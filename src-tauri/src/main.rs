@@ -13,10 +13,10 @@ fn expand_settings_panel(window: tauri::WebviewWindow) {
         let scale_factor = monitor.scale_factor();
         let logical_height = 600.0;
         let monitor_h = monitor.size().height as f64 / scale_factor;
-        let logical_x = (monitor.position().x as f64 / scale_factor) + (monitor.size().width as f64 / scale_factor) - 275.0;
+        let logical_x = (monitor.position().x as f64 / scale_factor) + (monitor.size().width as f64 / scale_factor) - 300.0;
         let logical_y = (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
         
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(275.0, logical_height)));
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(300.0, logical_height)));
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(logical_x, logical_y)));
     }
 }
@@ -57,7 +57,7 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
                 } else {
                     25.0
                 };
-                let target_width = if current_width > 150.0 { 275.0 } else { 40.0 };
+                let target_width = if current_width > 150.0 { 300.0 } else { 40.0 };
                 let logical_width = monitor.size().width as f64 / scale_factor;
                 let logical_height = if current_width > 150.0 { 600.0 } else { 40.0 };
                 let monitor_h = monitor.size().height as f64 / scale_factor;
