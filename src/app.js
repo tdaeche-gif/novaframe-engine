@@ -192,6 +192,22 @@ const ThemeManager = {
                 ...manifest.settings
             };
             this.currentTheme.mapImageSrc = imageUri;
+
+            // Load external shader sources if the theme declares a render_engine block
+            if (manifest.render_engine && manifest.render_engine.vertex_shader && manifest.render_engine.fragment_shader) {
+                const vertUri = window.__TAURI__.core.convertFileSrc(`${themePath}/${manifest.render_engine.vertex_shader}`);
+                const fragUri = window.__TAURI__.core.convertFileSrc(`${themePath}/${manifest.render_engine.fragment_shader}`);
+                const [vertRes, fragRes] = await Promise.all([fetch(vertUri), fetch(fragUri)]);
+                if (!vertRes.ok) throw new Error("Vertex shader missing at " + vertUri);
+                if (!fragRes.ok) throw new Error("Fragment shader missing at " + fragUri);
+                glShaderSources.vert = await vertRes.text();
+                glShaderSources.frag = await fragRes.text();
+                glInitialized = false; // Force WebGL re-init with new shader sources
+                console.log("[Geochron] External shaders loaded from theme:", manifest.render_engine);
+            } else {
+                glShaderSources.vert = null; // Reset to inline fallback
+                glShaderSources.frag = null;
+            }
             
             this.applyThemeToDOM();
             await ConfigManager.setTheme(themePath);
@@ -982,6 +998,7 @@ let glFailed = false;
 let glBuffer = null;
 let cityLightsTexture = null;
 let cityLightsUploaded = false;
+let glShaderSources = { vert: null, frag: null }; // Populated by ThemeManager.loadTheme()
 
 function compileShader(gl, type, source) {
     const shader = gl.createShader(type);
@@ -1013,7 +1030,8 @@ function initWebGLShader(winW, winH) {
         glContext = glCanvas.getContext('webgl', { alpha: true, premultipliedAlpha: false });
         if (!glContext) throw new Error("WebGL context not available");
         
-        const vsSource = `
+        // Use externally-loaded shader source (from active theme) or fall back to inline defaults
+        const vsSource = glShaderSources.vert ?? `
             attribute vec2 aVertexPosition;
             varying vec2 vUv;
             void main() {
@@ -1023,7 +1041,7 @@ function initWebGLShader(winW, winH) {
             }
         `;
         
-        const fsSource = `
+        const fsSource = glShaderSources.frag ?? `
             precision mediump float;
             varying vec2 vUv;
             uniform vec2 uSubsolar; // x = lon, y = lat
