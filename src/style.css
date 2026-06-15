@@ -69,7 +69,8 @@ canvas {
     cursor: pointer;
     z-index: 10000;
     color: rgba(255, 255, 255, 0.5);
-    transition: color 0.3s, filter 0.3s;
+    transition: color 0.3s, filter 0.3s, opacity 0.3s cubic-bezier(0.25, 1, 0.5, 1), transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+    pointer-events: auto;
 }
 
 .cog-icon {
@@ -88,9 +89,8 @@ canvas {
 }
 
 .panel-content {
-    margin-left: 25px;
     padding: 24px 20px;
-    width: 250px;
+    width: 275px;
     height: 100%;
     overflow-y: auto;
     background: rgba(10, 15, 26, 0.75);
@@ -103,6 +103,35 @@ canvas {
     display: flex;
     flex-direction: column;
     box-sizing: border-box;
+    transition: opacity 0.3s cubic-bezier(0.25, 1, 0.5, 1), transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+    opacity: 0;
+    transform: translateX(20px);
+}
+
+/* Media Queries for Collapsed/Expanded states based on window width */
+@media (min-width: 101px) {
+    .panel-handle {
+        opacity: 0;
+        transform: translateY(-50%) scale(0.5);
+        pointer-events: none;
+    }
+    .panel-content {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+@media (max-width: 100px) {
+    .panel-handle {
+        opacity: 1;
+        transform: translateY(-50%) scale(1);
+        pointer-events: auto;
+    }
+    .panel-content {
+        opacity: 0;
+        transform: translateX(20px);
+        pointer-events: none;
+    }
 }
 
 /* Form Styles */
