@@ -661,11 +661,32 @@ async function scanThemes() {
 
     if (window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen) {
         window.__TAURI__.event.listen('engine-apply-theme', async (event) => {
-            const url = event.payload;
-            console.log("[Novaframe] Received apply theme request from deep link:", url);
-            // TODO: In a production scenario, we'd download the WPK/ZIP file, unpack it to themes, 
-            // and call ConfigManager.setTheme(). For now, we log the success of the deep link pipeline.
-            alert("Deep Link Received!\nDownload URL: " + url + "\n(Integration successful!)");
+            const token = event.payload;
+            console.log("[Novaframe] Received apply theme request from deep link with token:", token);
+            
+            try {
+                const response = await fetch('https://marketplace-backend-gamma.vercel.app/api/engine/verify-token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    console.log("Token verified successfully! Wallpaper data:", data.wallpaper);
+                    alert("License Verified!\nDownloading: " + data.wallpaper.title + "\nFrom URL: " + data.wallpaper.downloadUrl + "\n(Integration successful!)");
+                    
+                    // TODO: In a production scenario, we'd download the WPK/ZIP file, unpack it to themes, 
+                    // and call ConfigManager.setTheme(). For now, we log the success of the deep link pipeline.
+                } else {
+                    console.error("Token verification failed:", data.error);
+                    alert("License Verification Failed: " + data.error);
+                }
+            } catch (err) {
+                console.error("Error verifying token:", err);
+                alert("Error verifying license token.");
+            }
         });
     }
 

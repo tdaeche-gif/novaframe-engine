@@ -98,13 +98,10 @@ fn main() {
                     println!("Received deep link: {}", url_str);
                     if url_str.starts_with("novaframe://apply") {
                         if let Some(query) = url.query() {
-                            // Basic extraction of url= param
-                            if let Some(download_url) = query.split('&').find(|p| p.starts_with("url=")).map(|p| p.trim_start_matches("url=")) {
-                                // decode download url
-                                if let Ok(decoded) = urlencoding::decode(download_url) {
-                                    // Send event to JS frontend to handle download/extraction
-                                    let _ = dl_handle.emit("engine-apply-theme", decoded.into_owned());
-                                }
+                            // Basic extraction of token= param
+                            if let Some(token) = query.split('&').find(|p| p.starts_with("token=")).map(|p| p.trim_start_matches("token=")) {
+                                // Send event to JS frontend to handle verification
+                                let _ = dl_handle.emit("engine-apply-theme", token);
                             }
                         }
                     }
