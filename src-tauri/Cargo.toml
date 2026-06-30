@@ -1,12 +1,12 @@
 [package]
-name = "geochronclock"
+name = "novaframe_engine"
 version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
 
 [lib]
-name = "geochronclock_lib"
+name = "novaframe_engine_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
