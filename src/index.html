@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Geochron Screensaver</title>
+    <title>Novaframe Screensaver</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -12,7 +12,7 @@
 <body>
     <div id="safe-area-detector"></div>
     <div id="container" style="position: relative; width: 100%; height: 100%;">
-        <canvas id="geochronCanvas" style="position: absolute; top: 0; left: 0;"></canvas>
+        <canvas id="novaframeCanvas" style="position: absolute; top: 0; left: 0;"></canvas>
         <canvas id="overlayCanvas" style="position: absolute; top: 0; left: 0; z-index: 10;"></canvas>
     </div>
 
@@ -24,7 +24,7 @@
             </svg>
         </div>
         <div class="panel-content">
-            <h3>Geochron Engine Settings</h3>
+            <h3>Novaframe Engine Settings</h3>
             <hr />
             
             <div class="control-group">
@@ -32,6 +32,9 @@
                 <select id="themeSelector" style="width: 100%; padding: 6px; background: #070a0f; border: 1px solid #222943; color: white; border-radius: 4px; margin-bottom: 10px;">
                     <option value="">Internal-Legacy</option>
                 </select>
+                <button id="openStoreBtn" style="width: 100%; padding: 8px; background: #10b981; border: none; color: #022c22; font-weight: bold; border-radius: 4px; cursor: pointer; transition: background 0.2s;">
+                    Browse Marketplace
+                </button>
             </div>
             
             <div class="control-group">

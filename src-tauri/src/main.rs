@@ -3,6 +3,7 @@
 
 use tauri::{Manager, Emitter};
 use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
+use tauri_plugin_deep_link::DeepLinkExt;
 
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSPoint, NSRect};
@@ -41,6 +42,14 @@ fn log_from_js(message: String) {
     println!("[JS Log] {}", message);
 }
 
+#[tauri::command]
+fn open_storefront_window(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("storefront") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 fn adjust_window_layouts(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if let Ok(Some(monitor)) = window.current_monitor() {
@@ -75,11 +84,34 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_desktop_underlay::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
-            adjust_window_layouts(&handle);
+            
+            // Handle incoming deep links (novaframe://apply?url=...)
+            let dl_handle = handle.clone();
+            handle.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    let url_str = url.as_str();
+                    println!("Received deep link: {}", url_str);
+                    if url_str.starts_with("novaframe://apply") {
+                        if let Some(query) = url.query() {
+                            // Basic extraction of url= param
+                            if let Some(download_url) = query.split('&').find(|p| p.starts_with("url=")).map(|p| p.trim_start_matches("url=")) {
+                                // decode download url
+                                if let Ok(decoded) = urlencoding::decode(download_url) {
+                                    // Send event to JS frontend to handle download/extraction
+                                    let _ = dl_handle.emit("engine-apply-theme", decoded.into_owned());
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            adjust_window_layouts(&app.handle().clone());
 
             // Spawn monitor configuration polling thread
             let handle_clone = handle.clone();
@@ -189,7 +221,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, log_from_js])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, log_from_js, open_storefront_window])
         .run(tauri::generate_context!())
-        .expect("error while running Geochron desktop runtime application");
+        .expect("error while running Novaframe desktop runtime application");
 }

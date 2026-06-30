@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Geochron",
+  "productName": "Novaframe",
   "version": "0.1.0",
-  "identifier": "com.geochron.desktop.wallpaper",
+  "identifier": "com.novaframe.desktop.wallpaper",
   "build": {
     "frontendDist": "../src"
   },
@@ -12,7 +12,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Geochron Wallpaper",
+        "title": "Novaframe Wallpaper",
         "url": "index.html?mode=main",
         "width": 1920,
         "height": 1080,
@@ -25,7 +25,7 @@
       },
       {
         "label": "settings",
-        "title": "Geochron Controls",
+        "title": "Novaframe Controls",
         "width": 30,
         "height": 1080,
         "decorations": false,
@@ -36,10 +36,27 @@
         "resizable": false,
         "visible": true,
         "url": "index.html?mode=settings"
+      },
+      {
+        "label": "storefront",
+        "title": "Novaframe Marketplace",
+        "url": "https://marketplace-frontend-three-xi.vercel.app/explore?source=engine",
+        "width": 1280,
+        "height": 800,
+        "visible": false,
+        "decorations": true,
+        "transparent": false,
+        "resizable": true,
+        "alwaysOnTop": false
       }
     ],
     "security": {
       "csp": null
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "schemes": ["novaframe"]
     }
   },
   "bundle": {

@@ -8,7 +8,7 @@ async function getThemesDir() {
             }
             return `${appData}/themes`;
         } catch (e) {
-            console.error("[Geochron] Failed to get appDataDir, falling back to local themes:", e);
+            console.error("[Novaframe] Failed to get appDataDir, falling back to local themes:", e);
         }
     }
     return 'themes';
@@ -26,7 +26,7 @@ async function verifyAndProvisionAppData() {
         // Check if themes/mercator-classic exists in AppData
         const hasTheme = await tauriFs.exists("themes/mercator-classic", { baseDir: appData });
         if (!hasTheme) {
-            console.log("[Geochron] Provisioning default theme to AppData...");
+            console.log("[Novaframe] Provisioning default theme to AppData...");
             
             // Create target folders recursively
             await tauriFs.mkdir("themes/mercator-classic", { baseDir: appData, recursive: true });
@@ -47,10 +47,10 @@ async function verifyAndProvisionAppData() {
             // Write map image to AppData
             await tauriFs.writeFile("themes/mercator-classic/world-map-mercator.jpg", new Uint8Array(mapBuf), { baseDir: appData });
             
-            console.log("[Geochron] Default theme provisioned successfully in AppData.");
+            console.log("[Novaframe] Default theme provisioned successfully in AppData.");
         }
     } catch (err) {
-        console.error("[Geochron] Failed to provision default theme in AppData:", err);
+        console.error("[Novaframe] Failed to provision default theme in AppData:", err);
     }
 }
 
@@ -63,7 +63,7 @@ async function setIgnoreCursor(ignore) {
                 await win.setIgnoreCursorEvents(ignore);
             }
         } catch (e) {
-            console.error("[Geochron] Failed to set ignore cursor events:", e);
+            console.error("[Novaframe] Failed to set ignore cursor events:", e);
         }
     }
 }
@@ -140,7 +140,7 @@ function initDualWindowSystem() {
 }
 
 // ── Canvas & context setup ─────────────────────────────────────────────────
-const baseCanvas = document.getElementById('geochronCanvas');
+const baseCanvas = document.getElementById('novaframeCanvas');
 const baseCtx = baseCanvas.getContext('2d', { alpha: false });
 
 const canvas = document.getElementById('overlayCanvas');
@@ -203,7 +203,7 @@ const ThemeManager = {
                 glShaderSources.vert = await vertRes.text();
                 glShaderSources.frag = await fragRes.text();
                 glInitialized = false; // Force WebGL re-init with new shader sources
-                console.log("[Geochron] External shaders loaded from theme:", manifest.render_engine);
+                console.log("[Novaframe] External shaders loaded from theme:", manifest.render_engine);
             } else {
                 glShaderSources.vert = null; // Reset to inline fallback
                 glShaderSources.frag = null;
@@ -212,7 +212,7 @@ const ThemeManager = {
             this.applyThemeToDOM();
             await ConfigManager.setTheme(themePath);
         } catch (err) {
-            console.error("[Geochron] Theme load failed, gracefully falling back to legacy internal map:", err);
+            console.error("[Novaframe] Theme load failed, gracefully falling back to legacy internal map:", err);
             this.fallbackToLegacy();
         }
     },
@@ -252,7 +252,7 @@ const ThemeManager = {
 const mapImage = new Image();
 const cityLightsImage = new Image();
 cityLightsImage.onload = () => {
-    console.log("[Geochron] City lights asset loaded.");
+    console.log("[Novaframe] City lights asset loaded.");
     if (glInitialized && !cityLightsUploaded) {
         startLoop();
     }
@@ -283,13 +283,13 @@ function startLoop() {
 
 mapImage.onload = () => {
     isMapLoaded = true;
-    console.log(`[Geochron] Map asset loaded: ${mapImage.naturalWidth}x${mapImage.naturalHeight}`);
+    console.log(`[Novaframe] Map asset loaded: ${mapImage.naturalWidth}x${mapImage.naturalHeight}`);
     resizeCanvas();
     startLoop();
 };
 
 mapImage.onerror = (err) => {
-    console.error(`[Geochron] ASSET LOAD FAILURE — missing mapImage asset`);
+    console.error(`[Novaframe] ASSET LOAD FAILURE — missing mapImage asset`);
     if (!mapImage.src.includes('assets/world-map-mercator.jpg')) {
         ThemeManager.fallbackToLegacy();
     } else {
@@ -360,29 +360,29 @@ const ConfigManager = {
         const tauriStore = window.__TAURI_PLUGIN_STORE__ || (window.__TAURI__ && window.__TAURI__.store);
         if (!tauriStore) {
             console.warn("[ConfigManager] Native store not available, using localStorage");
-            config = JSON.parse(localStorage.getItem('geochron_config')) || DEFAULT_CONFIG;
+            config = JSON.parse(localStorage.getItem('novaframe_config')) || DEFAULT_CONFIG;
             return;
         }
         
         try {
             if (tauriStore.load) {
-                this.store = await tauriStore.load("geochron_config.json");
+                this.store = await tauriStore.load("novaframe_config.json");
             } else if (tauriStore.Store && tauriStore.Store.load) {
-                this.store = await tauriStore.Store.load("geochron_config.json");
+                this.store = await tauriStore.Store.load("novaframe_config.json");
             } else {
-                this.store = new tauriStore.Store("geochron_config.json");
+                this.store = new tauriStore.Store("novaframe_config.json");
             }
             
             // Migration Bridge
-            const hasConfig = await this.store.has('geochron_config');
+            const hasConfig = await this.store.has('novaframe_config');
             if (!hasConfig) {
-                const oldConfig = localStorage.getItem('geochron_config');
+                const oldConfig = localStorage.getItem('novaframe_config');
                 if (oldConfig) {
                     console.log("[ConfigManager] Migrating localStorage to native JSON store...");
-                    await this.store.set('geochron_config', JSON.parse(oldConfig));
-                    localStorage.removeItem('geochron_config');
+                    await this.store.set('novaframe_config', JSON.parse(oldConfig));
+                    localStorage.removeItem('novaframe_config');
                 } else {
-                    await this.store.set('geochron_config', DEFAULT_CONFIG);
+                    await this.store.set('novaframe_config', DEFAULT_CONFIG);
                 }
                 
                 const oldTheme = localStorage.getItem('activeTheme');
@@ -394,11 +394,11 @@ const ConfigManager = {
                 await this.store.save();
             }
             
-            config = (await this.store.get('geochron_config')) || DEFAULT_CONFIG;
+            config = (await this.store.get('novaframe_config')) || DEFAULT_CONFIG;
             
             // Periodically sync config in wallpaper mode if changed from settings panel
             setInterval(async () => {
-                const latestConfig = await this.store.get('geochron_config');
+                const latestConfig = await this.store.get('novaframe_config');
                 if (latestConfig) config = latestConfig;
                 
                 // Theme sync
@@ -413,15 +413,15 @@ const ConfigManager = {
             
         } catch (e) {
             console.error("[ConfigManager] Native store failed:", e);
-            config = JSON.parse(localStorage.getItem('geochron_config')) || DEFAULT_CONFIG;
+            config = JSON.parse(localStorage.getItem('novaframe_config')) || DEFAULT_CONFIG;
         }
     },
     async saveConfig() {
         if (this.store) {
-            await this.store.set('geochron_config', config);
+            await this.store.set('novaframe_config', config);
             await this.store.save();
         }
-        localStorage.setItem('geochron_config', JSON.stringify(config));
+        localStorage.setItem('novaframe_config', JSON.stringify(config));
 
         if (window.__TAURI__ && window.__TAURI__.event) {
             try {
@@ -431,7 +431,7 @@ const ConfigManager = {
                     await window.__TAURI__.event.emit('config-changed', config);
                 }
             } catch (e) {
-                console.error("[Geochron] Config emit failed:", e);
+                console.error("[Novaframe] Config emit failed:", e);
             }
         }
     },
@@ -460,7 +460,7 @@ const ConfigManager = {
                     await window.__TAURI__.event.emit('theme-changed', themePath);
                 }
             } catch (e) {
-                console.error("[Geochron] Theme emit failed:", e);
+                console.error("[Novaframe] Theme emit failed:", e);
             }
         }
     }
@@ -645,9 +645,30 @@ async function scanThemes() {
         }
         
     } catch (e) {
-        console.error("[Geochron] scanThemes failed:", e);
+        console.error("[Novaframe] scanThemes failed:", e);
     }
     
+    const openStoreBtn = document.getElementById('openStoreBtn');
+    if (openStoreBtn) {
+        openStoreBtn.addEventListener('click', async () => {
+            if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
+                await window.__TAURI__.core.invoke('open_storefront_window');
+            } else {
+                console.error("Tauri invoke API not available.");
+            }
+        });
+    }
+
+    if (window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen) {
+        window.__TAURI__.event.listen('engine-apply-theme', async (event) => {
+            const url = event.payload;
+            console.log("[Novaframe] Received apply theme request from deep link:", url);
+            // TODO: In a production scenario, we'd download the WPK/ZIP file, unpack it to themes, 
+            // and call ConfigManager.setTheme(). For now, we log the success of the deep link pipeline.
+            alert("Deep Link Received!\nDownload URL: " + url + "\n(Integration successful!)");
+        });
+    }
+
     selector.addEventListener('change', async (e) => {
         const selected = e.target.value;
         await ConfigManager.setTheme(selected);
@@ -663,7 +684,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 ThemeManager.currentThemePath = newTheme;
                 ThemeManager.loadTheme(newTheme);
             }
-        } else if (e.key === 'geochron_config') {
+        } else if (e.key === 'novaframe_config') {
             try {
                 if (e.newValue) {
                     config = JSON.parse(e.newValue);
