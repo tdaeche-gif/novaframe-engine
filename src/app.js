@@ -674,11 +674,21 @@ async function scanThemes() {
                 const data = await response.json();
                 
                 if (response.ok && data.success) {
-                    console.log("Token verified successfully! Wallpaper data:", data.wallpaper);
-                    alert("License Verified!\nDownloading: " + data.wallpaper.title + "\nFrom URL: " + data.wallpaper.downloadUrl + "\n(Integration successful!)");
+                    const wallpaperId = data.wallpaper.id;
+                    const downloadUrl = data.wallpaper.downloadUrl;
                     
-                    // TODO: In a production scenario, we'd download the WPK/ZIP file, unpack it to themes, 
-                    // and call ConfigManager.setTheme(). For now, we log the success of the deep link pipeline.
+                    // Call the Rust command to download and install the theme
+                    console.log(`[Novaframe] Invoking Rust to download and install theme ${wallpaperId}...`);
+                    const installedThemeId = await window.__TAURI__.core.invoke('download_and_install_theme', { 
+                        url: downloadUrl,
+                        themeId: wallpaperId
+                    });
+                    
+                    console.log(`[Novaframe] Theme ${installedThemeId} installed successfully! Loading it...`);
+                    
+                    // Switch to the newly installed theme
+                    await ConfigManager.setTheme(installedThemeId);
+                    
                 } else {
                     console.error("Token verification failed:", data.error);
                     alert("License Verification Failed: " + data.error);

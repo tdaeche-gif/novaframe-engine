@@ -50,6 +50,88 @@ fn open_storefront_window(app: tauri::AppHandle) {
     }
 }
 
+#[tauri::command]
+async fn download_and_install_theme(app: tauri::AppHandle, url: String, theme_id: String) -> Result<String, String> {
+    use std::io::{Write, Read};
+    use futures_util::StreamExt;
+    use std::fs;
+    use std::path::Path;
+
+    let app_data_dir = app.path().app_data_dir().map_err(|e| format!("Failed to get app_data_dir: {}", e))?;
+    let themes_dir = app_data_dir.join("themes");
+    
+    // Ensure themes directory exists
+    if !themes_dir.exists() {
+        fs::create_dir_all(&themes_dir).map_err(|e| format!("Failed to create themes dir: {}", e))?;
+    }
+    
+    // Prepare temp file path
+    let temp_zip_path = std::env::temp_dir().join(format!("{}.zip", theme_id));
+    
+    println!("[Novaframe] Downloading theme {} from {}", theme_id, url);
+    
+    // Download using reqwest
+    let response = reqwest::get(&url).await.map_err(|e| format!("Failed to fetch: {}", e))?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Download failed with status: {}", response.status()));
+    }
+    
+    let mut temp_file = fs::File::create(&temp_zip_path).map_err(|e| format!("Failed to create temp file: {}", e))?;
+    
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Error while downloading: {}", e))?;
+        temp_file.write_all(&chunk).map_err(|e| format!("Error writing chunk: {}", e))?;
+    }
+    
+    println!("[Novaframe] Download complete, extracting to {:?}", themes_dir);
+    
+    // Extract using zip crate
+    let file = fs::File::open(&temp_zip_path).map_err(|e| format!("Failed to open temp zip: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {}", e))?;
+    
+    let target_theme_dir = themes_dir.join(&theme_id);
+    
+    // We expect the zip to extract directly into themes_dir/theme_id, 
+    // or if the zip already contains a root folder, we might need to handle it.
+    // For safety, we will extract to target_theme_dir and strip any top-level folder if it exists.
+    
+    if !target_theme_dir.exists() {
+        fs::create_dir_all(&target_theme_dir).map_err(|e| format!("Failed to create target theme dir: {}", e))?;
+    }
+    
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| format!("Failed to access zip file: {}", e))?;
+        let outpath = match file.enclosed_name() {
+            Some(path) => {
+                // Determine if we need to strip a top-level directory 
+                // Wait, to keep it simple, just extract it as is into target_theme_dir
+                target_theme_dir.join(path)
+            },
+            None => continue,
+        };
+        
+        if file.name().ends_with('/') {
+            fs::create_dir_all(&outpath).unwrap_or_default();
+        } else {
+            if let Some(p) = outpath.parent() {
+                if !p.exists() {
+                    fs::create_dir_all(p).unwrap_or_default();
+                }
+            }
+            let mut outfile = fs::File::create(&outpath).map_err(|e| format!("Failed to create extracted file: {}", e))?;
+            std::io::copy(&mut file, &mut outfile).map_err(|e| format!("Failed to write extracted file: {}", e))?;
+        }
+    }
+    
+    // Clean up
+    let _ = fs::remove_file(temp_zip_path);
+    
+    println!("[Novaframe] Theme installed successfully.");
+    Ok(theme_id)
+}
+
 fn adjust_window_layouts(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if let Ok(Some(monitor)) = window.current_monitor() {
@@ -218,7 +300,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, log_from_js, open_storefront_window])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, log_from_js, open_storefront_window, download_and_install_theme])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }
