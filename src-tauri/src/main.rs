@@ -1,9 +1,9 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::{Manager, Emitter};
-use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
+use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
 
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSPoint, NSRect};
@@ -14,11 +14,19 @@ fn expand_settings_panel(window: tauri::WebviewWindow) {
         let scale_factor = monitor.scale_factor();
         let logical_height = 600.0;
         let monitor_h = monitor.size().height as f64 / scale_factor;
-        let logical_x = (monitor.position().x as f64 / scale_factor) + (monitor.size().width as f64 / scale_factor) - 300.0;
-        let logical_y = (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
-        
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(300.0, logical_height)));
-        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(logical_x, logical_y)));
+        let logical_x = (monitor.position().x as f64 / scale_factor)
+            + (monitor.size().width as f64 / scale_factor)
+            - 300.0;
+        let logical_y =
+            (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
+
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+            300.0,
+            logical_height,
+        )));
+        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
+            logical_x, logical_y,
+        )));
     }
 }
 
@@ -29,11 +37,19 @@ fn collapse_settings_panel(window: tauri::WebviewWindow) {
         let logical_height = 40.0;
         let logical_width = 40.0;
         let monitor_h = monitor.size().height as f64 / scale_factor;
-        let logical_x = (monitor.position().x as f64 / scale_factor) + (monitor.size().width as f64 / scale_factor) - logical_width;
-        let logical_y = (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
-        
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(logical_width, logical_height)));
-        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(logical_x, logical_y)));
+        let logical_x = (monitor.position().x as f64 / scale_factor)
+            + (monitor.size().width as f64 / scale_factor)
+            - logical_width;
+        let logical_y =
+            (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
+
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+            logical_width,
+            logical_height,
+        )));
+        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
+            logical_x, logical_y,
+        )));
     }
 }
 
@@ -51,67 +67,91 @@ fn open_storefront_window(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-async fn download_and_install_theme(app: tauri::AppHandle, url: String, theme_id: String) -> Result<String, String> {
-    use std::io::{Write, Read};
+async fn download_and_install_theme(
+    app: tauri::AppHandle,
+    url: String,
+    theme_id: String,
+) -> Result<String, String> {
     use futures_util::StreamExt;
     use std::fs;
+    use std::io::{Read, Write};
     use std::path::Path;
 
-    let app_data_dir = app.path().app_data_dir().map_err(|e| format!("Failed to get app_data_dir: {}", e))?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app_data_dir: {}", e))?;
     let themes_dir = app_data_dir.join("themes");
-    
+
     // Ensure themes directory exists
     if !themes_dir.exists() {
-        fs::create_dir_all(&themes_dir).map_err(|e| format!("Failed to create themes dir: {}", e))?;
+        fs::create_dir_all(&themes_dir)
+            .map_err(|e| format!("Failed to create themes dir: {}", e))?;
     }
-    
+
     // Prepare temp file path
     let temp_zip_path = std::env::temp_dir().join(format!("{}.zip", theme_id));
-    
+
     println!("[Novaframe] Downloading theme {} from {}", theme_id, url);
-    
+
     // Download using reqwest
-    let response = reqwest::get(&url).await.map_err(|e| format!("Failed to fetch: {}", e))?;
-    
+    let response = reqwest::get(&url)
+        .await
+        .map_err(|e| format!("Failed to fetch: {}", e))?;
+
     if !response.status().is_success() {
-        return Err(format!("Download failed with status: {}", response.status()));
+        return Err(format!(
+            "Download failed with status: {}",
+            response.status()
+        ));
     }
-    
-    let mut temp_file = fs::File::create(&temp_zip_path).map_err(|e| format!("Failed to create temp file: {}", e))?;
-    
+
+    let mut temp_file = fs::File::create(&temp_zip_path)
+        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Error while downloading: {}", e))?;
-        temp_file.write_all(&chunk).map_err(|e| format!("Error writing chunk: {}", e))?;
+        temp_file
+            .write_all(&chunk)
+            .map_err(|e| format!("Error writing chunk: {}", e))?;
     }
-    
-    println!("[Novaframe] Download complete, extracting to {:?}", themes_dir);
-    
+
+    println!(
+        "[Novaframe] Download complete, extracting to {:?}",
+        themes_dir
+    );
+
     // Extract using zip crate
-    let file = fs::File::open(&temp_zip_path).map_err(|e| format!("Failed to open temp zip: {}", e))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {}", e))?;
-    
+    let file =
+        fs::File::open(&temp_zip_path).map_err(|e| format!("Failed to open temp zip: {}", e))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {}", e))?;
+
     let target_theme_dir = themes_dir.join(&theme_id);
-    
-    // We expect the zip to extract directly into themes_dir/theme_id, 
+
+    // We expect the zip to extract directly into themes_dir/theme_id,
     // or if the zip already contains a root folder, we might need to handle it.
     // For safety, we will extract to target_theme_dir and strip any top-level folder if it exists.
-    
+
     if !target_theme_dir.exists() {
-        fs::create_dir_all(&target_theme_dir).map_err(|e| format!("Failed to create target theme dir: {}", e))?;
+        fs::create_dir_all(&target_theme_dir)
+            .map_err(|e| format!("Failed to create target theme dir: {}", e))?;
     }
-    
+
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i).map_err(|e| format!("Failed to access zip file: {}", e))?;
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to access zip file: {}", e))?;
         let outpath = match file.enclosed_name() {
             Some(path) => {
-                // Determine if we need to strip a top-level directory 
+                // Determine if we need to strip a top-level directory
                 // Wait, to keep it simple, just extract it as is into target_theme_dir
                 target_theme_dir.join(path)
-            },
+            }
             None => continue,
         };
-        
+
         if file.name().ends_with('/') {
             fs::create_dir_all(&outpath).unwrap_or_default();
         } else {
@@ -120,14 +160,16 @@ async fn download_and_install_theme(app: tauri::AppHandle, url: String, theme_id
                     fs::create_dir_all(p).unwrap_or_default();
                 }
             }
-            let mut outfile = fs::File::create(&outpath).map_err(|e| format!("Failed to create extracted file: {}", e))?;
-            std::io::copy(&mut file, &mut outfile).map_err(|e| format!("Failed to write extracted file: {}", e))?;
+            let mut outfile = fs::File::create(&outpath)
+                .map_err(|e| format!("Failed to create extracted file: {}", e))?;
+            std::io::copy(&mut file, &mut outfile)
+                .map_err(|e| format!("Failed to write extracted file: {}", e))?;
         }
     }
-    
+
     // Clean up
     let _ = fs::remove_file(temp_zip_path);
-    
+
     println!("[Novaframe] Theme installed successfully.");
     Ok(theme_id)
 }
@@ -138,7 +180,7 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
             let scale_factor = monitor.scale_factor();
             let logical_size = monitor.size().to_logical::<f64>(scale_factor);
             let logical_pos = monitor.position().to_logical::<f64>(scale_factor);
-            
+
             let _ = window.set_size(tauri::Size::Logical(logical_size));
             let _ = window.set_position(tauri::Position::Logical(logical_pos));
 
@@ -152,11 +194,18 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
                 let logical_width = monitor.size().width as f64 / scale_factor;
                 let logical_height = if current_width > 150.0 { 600.0 } else { 40.0 };
                 let monitor_h = monitor.size().height as f64 / scale_factor;
-                let logical_x = (monitor.position().x as f64 / scale_factor) + logical_width - target_width;
-                let logical_y = (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
-                
-                let _ = settings_window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(target_width, logical_height)));
-                let _ = settings_window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(logical_x, logical_y)));
+                let logical_x =
+                    (monitor.position().x as f64 / scale_factor) + logical_width - target_width;
+                let logical_y = (monitor.position().y as f64 / scale_factor)
+                    + (monitor_h - logical_height) / 2.0;
+
+                let _ = settings_window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+                    target_width,
+                    logical_height,
+                )));
+                let _ = settings_window.set_position(tauri::Position::Logical(
+                    tauri::LogicalPosition::new(logical_x, logical_y),
+                ));
             }
         }
     }
@@ -164,6 +213,7 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_desktop_underlay::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())

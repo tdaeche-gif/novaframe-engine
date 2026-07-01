@@ -1322,3 +1322,75 @@ document.addEventListener('visibilitychange', () => {
         startLoop();
     }
 });
+
+// Auto-Updater Integration
+const updateBtn = document.getElementById('updateBtn');
+const updateStatus = document.getElementById('updateStatus');
+
+if (updateBtn) {
+    updateBtn.addEventListener('click', async () => {
+        try {
+            updateStatus.innerText = 'Checking for updates...';
+            updateStatus.style.color = '#888';
+            updateBtn.disabled = true;
+
+            const updater = window.__TAURI_PLUGIN_UPDATER__ || (window.__TAURI__ && window.__TAURI__.updater);
+            if (!updater) {
+                updateStatus.innerText = 'Updater not available in this build.';
+                updateStatus.style.color = '#ef4444';
+                return;
+            }
+
+            const update = await updater.check();
+            if (update) {
+                updateStatus.innerText = `Update found: v${update.version}. Downloading...`;
+                updateStatus.style.color = '#3b82f6';
+                
+                let downloaded = 0;
+                let contentLength = 0;
+                
+                await update.downloadAndInstall((event) => {
+                    switch (event.event) {
+                        case 'Started':
+                            contentLength = event.data.contentLength;
+                            updateStatus.innerText = `Downloading... 0%`;
+                            break;
+                        case 'Progress':
+                            downloaded += event.data.chunkLength;
+                            if (contentLength) {
+                                const percent = Math.round((downloaded / contentLength) * 100);
+                                updateStatus.innerText = `Downloading... ${percent}%`;
+                            }
+                            break;
+                        case 'Finished':
+                            updateStatus.innerText = `Installing...`;
+                            break;
+                    }
+                });
+
+                updateStatus.innerText = 'Update installed! Restarting...';
+                updateStatus.style.color = '#10b981';
+                setTimeout(async () => {
+                    const process = window.__TAURI_PLUGIN_PROCESS__ || (window.__TAURI__ && window.__TAURI__.process);
+                    if (process && process.relaunch) {
+                        await process.relaunch();
+                    }
+                }, 1500);
+            } else {
+                updateStatus.innerText = 'You are on the latest version.';
+                updateStatus.style.color = '#10b981';
+            }
+        } catch (error) {
+            console.error('Update error:', error);
+            updateStatus.innerText = `Update failed: ${error}`;
+            updateStatus.style.color = '#ef4444';
+        } finally {
+            updateBtn.disabled = false;
+            setTimeout(() => {
+                if (updateStatus.innerText.includes('latest version') || updateStatus.innerText.includes('failed')) {
+                    updateStatus.innerText = '';
+                }
+            }, 5000);
+        }
+    });
+}

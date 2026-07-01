@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@tauri-apps/plugin-fs": "^2.5.1",
-    "@tauri-apps/plugin-store": "^2.4.3"
+    "@tauri-apps/plugin-store": "^2.4.3",
+    "@tauri-apps/plugin-updater": "^2.10.1"
   }
 }
