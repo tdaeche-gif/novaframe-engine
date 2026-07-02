@@ -191,6 +191,12 @@ async fn download_and_install_theme(
     let _ = fs::remove_file(temp_zip_path);
 
     println!("[Novaframe] Theme installed successfully.");
+    
+    // Notify the main window that a theme was installed
+    use tauri::Emitter;
+    let absolute_path = target_theme_dir.to_string_lossy().to_string();
+    let _ = app.emit("theme-installed", absolute_path);
+
     Ok(theme_id)
 }
 

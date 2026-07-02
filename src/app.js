@@ -750,6 +750,23 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             });
 
+            window.__TAURI__.event.listen('theme-installed', async (event) => {
+                const absoluteThemePath = event.payload;
+                console.log("[Novaframe] Received theme-installed event with path:", absoluteThemePath);
+                
+                await ConfigManager.setTheme(absoluteThemePath);
+                
+                // Force UI refresh of the theme list
+                const select = document.getElementById('theme-select');
+                if (select) {
+                    const evt = new Event('change');
+                    select.dispatchEvent(evt);
+                }
+                
+                // Full reload to guarantee shaders pick up the new theme
+                window.location.reload();
+            });
+
             window.__TAURI__.event.listen('config-changed', (event) => {
                 if (event.payload) {
                     config = event.payload;
