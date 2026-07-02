@@ -686,8 +686,19 @@ async function scanThemes() {
                     console.log(`[Novaframe] Theme ${installedThemeId} installed successfully! Loading it...`);
                     
                     // Switch to the newly installed theme
-                    await ConfigManager.setTheme(installedThemeId);
+                    const themesDir = await getThemesDir();
+                    const absoluteThemePath = `${themesDir}/${installedThemeId}`;
+                    await ConfigManager.setTheme(absoluteThemePath);
                     
+                    // Force UI refresh of the theme list
+                    const select = document.getElementById('theme-select');
+                    if (select) {
+                        const evt = new Event('change');
+                        select.dispatchEvent(evt);
+                    }
+                    
+                    // Full reload to guarantee shaders pick up the new theme
+                    window.location.reload();
                 } else {
                     console.error("Token verification failed:", data.error);
                     alert("License Verification Failed: " + data.error);
