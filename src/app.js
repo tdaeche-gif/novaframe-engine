@@ -1,17 +1,16 @@
 // Helper to resolve the themes directory path in AppData dynamically
 async function getThemesDir() {
-    if (window.__TAURI__ && window.__TAURI__.path) {
-        try {
-            let appData = await window.__TAURI__.path.appDataDir();
-            if (appData.endsWith('/') || appData.endsWith('\\')) {
-                appData = appData.slice(0, -1);
-            }
-            return `${appData}/themes`;
-        } catch (e) {
-            console.error("[Novaframe] Failed to get appDataDir, falling back to local themes:", e);
+    try {
+        let themesDir = await window.__TAURI__.core.invoke('get_themes_dir');
+        // Ensure no trailing slash
+        if (themesDir.endsWith('/') || themesDir.endsWith('\\')) {
+            themesDir = themesDir.slice(0, -1);
         }
+        return themesDir;
+    } catch (e) {
+        console.error("[Novaframe] Failed to get appDataDir from Rust, falling back to local themes:", e);
+        return 'themes';
     }
-    return 'themes';
 }
 
 // Check and provision default theme inside system AppData on startup
@@ -665,7 +664,7 @@ async function scanThemes() {
             console.log("[Novaframe] Received apply theme request from deep link with token:", token);
             
             try {
-                const response = await fetch('https://marketplace-backend-gamma.vercel.app/api/engine/verify-token', {
+                const response = await fetch('https://api.novaframe.co.uk/api/engine/verify-token', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ token })

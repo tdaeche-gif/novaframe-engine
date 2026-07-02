@@ -63,7 +63,27 @@ fn open_storefront_window(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("storefront") {
         let _ = window.show();
         let _ = window.set_focus();
+    } else {
+        // Recreate the window if it was closed and destroyed
+        let _ = tauri::WebviewWindowBuilder::new(
+            &app,
+            "storefront",
+            tauri::WebviewUrl::External("https://www.novaframe.co.uk/explore?source=engine".parse().unwrap())
+        )
+        .title("Novaframe Marketplace")
+        .inner_size(1280.0, 800.0)
+        .build();
     }
+}
+
+#[tauri::command]
+fn get_themes_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app_data_dir: {}", e))?;
+    let themes_dir = app_data_dir.join("themes");
+    Ok(themes_dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -350,7 +370,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, log_from_js, open_storefront_window, download_and_install_theme])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, log_from_js, open_storefront_window, download_and_install_theme, get_themes_dir])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }
