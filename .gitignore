@@ -27,6 +27,8 @@ dist-ssr
 *.zip
 *.tar.gz
 *.rar
+themes/*/
+!themes/README.md
 
 # Environment Variables
 .env
