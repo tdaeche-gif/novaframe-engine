@@ -17,60 +17,64 @@
     </div>
 
     <div id="settingsPanel">
-        <div class="panel-handle">
-            <svg class="cog-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3"></circle>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-            </svg>
-        </div>
         <div class="panel-content">
             <div style="display: flex; align-items: center; gap: 10px;">
                 <img src="assets/logo.png" alt="Novaframe Logo" style="width: 32px; height: 32px; border-radius: 6px;">
                 <h3 style="margin: 0;">Novaframe Engine</h3>
             </div>
             <hr />
-            
+
+            <!-- COMMON-SCOPE: visible for all themes -->
             <div class="control-group">
                 <label for="themeSelector">Active Theme</label>
-                <select id="themeSelector" style="width: 100%; padding: 6px; background: #070a0f; border: 1px solid #222943; color: white; border-radius: 4px; margin-bottom: 10px;">
+                <select id="themeSelector">
                     <option value="">Internal-Legacy</option>
                 </select>
-                <button id="openStoreBtn" style="width: 100%; padding: 8px; background: #10b981; border: none; color: #022c22; font-weight: bold; border-radius: 4px; cursor: pointer; transition: background 0.2s;">
+                <button id="openStoreBtn" class="btn-primary">
                     Browse Marketplace
                 </button>
             </div>
-            
-            <div class="control-group">
-                <label for="opacitySlider">Shadow Opacity</label>
-                <input type="range" id="opacitySlider" min="0" max="90" value="55">
-            </div>
 
-            <div class="control-group" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
-                <label for="analemmaToggle" style="margin-bottom: 0;">Show Solar Analemma</label>
-                <input type="checkbox" id="analemmaToggle" checked>
-            </div>
-            
-            <hr />
-            <h4>Tracked Pins</h4>
-            <div id="pinsList"></div>
-            
-            <div class="add-pin-form">
-                <input type="text" id="pinName" placeholder="Name (e.g. London)" list="citiesList">
-                <datalist id="citiesList"></datalist>
-                <div class="row">
-                    <input type="number" id="pinLat" step="0.0001" placeholder="Lat (51.5)">
-                    <input type="number" id="pinLon" step="0.0001" placeholder="Lon (-0.1)">
+            <!-- LEGACY-SCOPE: only visible when active theme's manifest declares internal-legacy -->
+            <section id="legacySection" data-scope="legacy">
+                <div class="control-group">
+                    <label for="opacitySlider">Shadow Opacity</label>
+                    <input type="range" id="opacitySlider" min="0" max="90" value="55">
                 </div>
-                <button id="addPinBtn">Add Custom Pin</button>
-            </div>
-            
+
+                <div class="control-group control-row">
+                    <label for="analemmaToggle">Show Solar Analemma</label>
+                    <input type="checkbox" id="analemmaToggle" checked>
+                </div>
+
+                <hr />
+                <h4>Tracked Pins</h4>
+                <div id="pinsList"></div>
+
+                <div class="add-pin-form">
+                    <input type="text" id="pinName" placeholder="Name (e.g. London)" list="citiesList">
+                    <datalist id="citiesList"></datalist>
+                    <div class="row">
+                        <input type="number" id="pinLat" step="0.0001" placeholder="Lat (51.5)">
+                        <input type="number" id="pinLon" step="0.0001" placeholder="Lon (-0.1)">
+                    </div>
+                    <button id="addPinBtn">Add Custom Pin</button>
+                </div>
+            </section>
+
             <hr />
             <div class="control-group">
-                <button id="updateBtn" style="width: 100%; padding: 8px; background: transparent; border: 1px solid #10b981; color: #10b981; font-weight: bold; border-radius: 4px; cursor: pointer; transition: background 0.2s;">
+                <button id="updateBtn" class="btn-secondary">
                     Check for Updates
                 </button>
-                <div id="updateStatus" style="font-size: 11px; color: #888; text-align: center; margin-top: 5px;"></div>
+                <div id="updateStatus" class="status-text"></div>
             </div>
+        </div>
+        <div class="panel-handle">
+            <svg class="cog-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 0.33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82V9a1.65 1.65 0 0 0 1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
         </div>
     </div>
 

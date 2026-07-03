@@ -12,17 +12,18 @@ use objc2_foundation::{NSPoint, NSRect};
 fn expand_settings_panel(window: tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         let scale_factor = monitor.scale_factor();
-        let logical_height = 600.0;
+        let panel_width: f64 = 360.0; // 320 panel + 40 cog tab
+        let panel_height: f64 = 600.0;
         let monitor_h = monitor.size().height as f64 / scale_factor;
-        let logical_x = (monitor.position().x as f64 / scale_factor)
-            + (monitor.size().width as f64 / scale_factor)
-            - 300.0;
-        let logical_y =
-            (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
+        let monitor_w = monitor.size().width as f64 / scale_factor;
+        // Anchor to far-right of monitor
+        let logical_x = (monitor.position().x as f64 / scale_factor) + (monitor_w - panel_width);
+        let logical_y = (monitor.position().y as f64 / scale_factor)
+            + (monitor_h - panel_height) / 2.0;
 
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-            300.0,
-            logical_height,
+            panel_width,
+            panel_height,
         )));
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
             logical_x, logical_y,
@@ -34,7 +35,7 @@ fn expand_settings_panel(window: tauri::WebviewWindow) {
 fn collapse_settings_panel(window: tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         let scale_factor = monitor.scale_factor();
-        let logical_height = 40.0;
+        let logical_height = 600.0;
         let logical_width = 40.0;
         let monitor_h = monitor.size().height as f64 / scale_factor;
         let logical_x = (monitor.position().x as f64 / scale_factor)
@@ -55,35 +56,28 @@ fn collapse_settings_panel(window: tauri::WebviewWindow) {
 
 #[tauri::command]
 fn log_from_js(message: String) {
-    println!("[JS Log] {}", message);
+    println!("[JS] {}", message);
 }
 
 #[tauri::command]
-fn open_storefront_window(app: tauri::AppHandle) {
+async fn open_storefront_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("storefront") {
-        let _ = window.show();
-        let _ = window.set_focus();
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        Ok(())
     } else {
-        // Recreate the window if it was closed and destroyed
-        let _ = tauri::WebviewWindowBuilder::new(
-            &app,
-            "storefront",
-            tauri::WebviewUrl::External("https://www.novaframe.co.uk/explore?source=engine".parse().unwrap())
-        )
-        .title("Novaframe Marketplace")
-        .inner_size(1280.0, 800.0)
-        .build();
+        Err("storefront window not registered".into())
     }
 }
 
 #[tauri::command]
 fn get_themes_dir(app: tauri::AppHandle) -> Result<String, String> {
-    let app_data_dir = app
+    let dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Failed to get app_data_dir: {}", e))?;
-    let themes_dir = app_data_dir.join("themes");
-    Ok(themes_dir.to_string_lossy().to_string())
+        .map_err(|e| format!("Failed to get app_data_dir: {}", e))?
+        .join("themes");
+    Ok(dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -91,6 +85,7 @@ async fn download_and_install_theme(
     app: tauri::AppHandle,
     url: String,
     theme_id: String,
+    wallpaper_title: Option<String>,
 ) -> Result<String, String> {
     use futures_util::StreamExt;
     use std::fs;
@@ -150,10 +145,6 @@ async fn download_and_install_theme(
 
     let target_theme_dir = themes_dir.join(&theme_id);
 
-    // We expect the zip to extract directly into themes_dir/theme_id,
-    // or if the zip already contains a root folder, we might need to handle it.
-    // For safety, we will extract to target_theme_dir and strip any top-level folder if it exists.
-
     if !target_theme_dir.exists() {
         fs::create_dir_all(&target_theme_dir)
             .map_err(|e| format!("Failed to create target theme dir: {}", e))?;
@@ -163,16 +154,36 @@ async fn download_and_install_theme(
         let mut file = archive
             .by_index(i)
             .map_err(|e| format!("Failed to access zip file: {}", e))?;
+
+        let entry_name = file.name().to_string();
+
+        // Skip macOS resource-fork junk that some zip tools include.
+        if entry_name.starts_with("__MACOSX/") || entry_name == "__MACOSX" {
+            continue;
+        }
+
+        // Strip any single top-level directory inside the archive so files land
+        // directly under <themes_dir>/<theme_id>/. e.g. archive contains
+        // "myTheme/index.html" → we want .../themes/<theme_id>/index.html
+        let stripped = entry_name
+            .splitn(2, '/')
+            .nth(1)
+            .unwrap_or("")
+            .to_string();
+
+        // If the archive has no top-level wrapper (already flat), keep the full path.
+        let relative_path = if stripped.is_empty() {
+            entry_name.clone()
+        } else {
+            stripped
+        };
+
         let outpath = match file.enclosed_name() {
-            Some(path) => {
-                // Determine if we need to strip a top-level directory
-                // Wait, to keep it simple, just extract it as is into target_theme_dir
-                target_theme_dir.join(path)
-            }
+            Some(_) => target_theme_dir.join(&relative_path),
             None => continue,
         };
 
-        if file.name().ends_with('/') {
+        if entry_name.ends_with('/') {
             fs::create_dir_all(&outpath).unwrap_or_default();
         } else {
             if let Some(p) = outpath.parent() {
@@ -190,14 +201,73 @@ async fn download_and_install_theme(
     // Clean up
     let _ = fs::remove_file(temp_zip_path);
 
-    println!("[Novaframe] Theme installed successfully.");
-    
+    // ── Rename install dir from UUID → human-readable title ─────────────────
+    // This makes the settings-panel dropdown show "Ignis: Interactive Solar Wind"
+    // instead of a raw UUID. Falls back to the UUID folder name if no title was
+    // supplied (shouldn't happen with the new listener, but defensive).
+    let display_name = wallpaper_title
+        .as_deref()
+        .map(|t| sanitize_dir_name(t))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| theme_id.clone());
+
+    let named_dir = themes_dir.join(&display_name);
+
+    if named_dir != target_theme_dir {
+        if named_dir.exists() {
+            // Same-named theme already installed — remove the stale one first so
+            // scanThemes doesn't pick up duplicate entries.
+            let _ = fs::remove_dir_all(&named_dir);
+        }
+        // Rename the just-extracted UUID folder to the human-readable name.
+        if let Err(e) = fs::rename(&target_theme_dir, &named_dir) {
+            println!(
+                "[Novaframe] Rename UUID → title failed ({}); keeping UUID folder name.",
+                e
+            );
+        }
+    }
+
+    println!(
+        "[Novaframe] Theme installed successfully at {:?}",
+        if named_dir.exists() { &named_dir } else { &target_theme_dir }
+    );
+
     // Notify the main window that a theme was installed
     use tauri::Emitter;
-    let absolute_path = target_theme_dir.to_string_lossy().to_string();
+    let final_dir = if named_dir.exists() { &named_dir } else { &target_theme_dir };
+    let absolute_path = final_dir.to_string_lossy().to_string();
     let _ = app.emit("theme-installed", absolute_path);
 
-    Ok(theme_id)
+    Ok(display_name)
+}
+
+/// Sanitize a wallpaper title for use as a directory name:
+///   - strip path separators and other filesystem-unsafe chars
+///   - collapse whitespace
+///   - trim leading/trailing dots and whitespace
+///   - cap at 80 chars
+fn sanitize_dir_name(input: &str) -> String {
+    let cleaned: String = input
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    let collapsed: String = trimmed
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        return String::new();
+    }
+    if collapsed.chars().count() > 80 {
+        collapsed.chars().take(80).collect()
+    } else {
+        collapsed
+    }
 }
 
 fn adjust_window_layouts(app: &tauri::AppHandle) {
@@ -326,6 +396,12 @@ fn main() {
                 #[cfg(target_os = "macos")]
                 {
                     let settings_clone = settings_window.clone();
+                    // Hover-toggle settings window: poll mouse position against
+                    // the window's NSRect every 100ms; when the cursor enters
+                    // or leaves, expand (275x600) or collapse (40x600). The
+                    // CSS @media queries inside the webview handle the visual
+                    // reveal of the panel-handle vs panel-content based on
+                    // viewport width.                                                 */
                     std::thread::spawn(move || {
                         let mut was_hovered = false;
                         loop {
@@ -339,32 +415,18 @@ fn main() {
                                     let ns_event_class = objc2::class!(NSEvent);
                                     let mouse_loc: NSPoint = objc2::msg_send![ns_event_class, mouseLocation];
                                     let frame: NSRect = objc2::msg_send![ns_window, frame];
-                                    
+
                                     let is_hovered = mouse_loc.x >= frame.origin.x &&
                                                      mouse_loc.x <= frame.origin.x + frame.size.width &&
                                                      mouse_loc.y >= frame.origin.y &&
                                                      mouse_loc.y <= frame.origin.y + frame.size.height;
-                                                     
+
                                     if is_hovered != was_hovered {
                                         was_hovered = is_hovered;
                                         if is_hovered {
                                             expand_settings_panel(settings_clone.clone());
-                                            let window_for_closure = settings_clone.clone();
-                                            let _ = settings_clone.run_on_main_thread(move || {
-                                                if let Ok(ns_window_ptr) = window_for_closure.ns_window() {
-                                                    let ns_window = ns_window_ptr as *mut objc2::runtime::AnyObject;
-                                                    let _: () = objc2::msg_send![ns_window, setLevel: 3isize];
-                                                }
-                                            });
                                         } else {
                                             collapse_settings_panel(settings_clone.clone());
-                                            let window_for_closure = settings_clone.clone();
-                                            let _ = settings_clone.run_on_main_thread(move || {
-                                                if let Ok(ns_window_ptr) = window_for_closure.ns_window() {
-                                                    let ns_window = ns_window_ptr as *mut objc2::runtime::AnyObject;
-                                                    let _: () = objc2::msg_send![ns_window, setLevel: 3isize];
-                                                }
-                                            });
                                         }
                                     }
                                 }

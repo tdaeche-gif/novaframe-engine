@@ -11,6 +11,8 @@ html, body {
     height: 100vh;
     overflow: hidden;
     background-color: #0f141d;
+    font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #e0e8ff;
 }
 
 #container {
@@ -41,100 +43,97 @@ canvas {
     pointer-events: none;
 }
 
-/* ─── Settings Panel Containers ─── */
+/* ─── Settings Panel ─────────────────────────────────────────────────────
+   Design (current):
+   - The panel is a flex row anchored to the right of the window.  The
+     cog (.panel-handle) is ALWAYS visible at the left edge — it is the
+     persistent affordance.
+   - .panel-content sits to the right of the cog. When the window is 40px
+     wide (Rust's collapsed state on hover-out), the content is clipped
+     off-screen by the window's own width — only the cog is visible.
+   - When Rust expands the window to 275px on hover, the content becomes
+     fully visible alongside the cog.                                                   */
+
 #settingsPanel {
     position: absolute;
-    top: 90px; /* Offset below timeline (40px) + menu bar (40px) */
-    right: -275px; /* Hidden off-screen (300 - 25 = 275) */
-    width: 300px;
+    top: 90px;
+    right: 0;
+    width: 100%;
     height: 100%;
+    display: flex;
+    flex-direction: row;
+    justify-content: flex-end;
+    align-items: stretch;
     color: #e0e8ff;
-    font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
     z-index: 9999;
+    pointer-events: none;
 }
 
 .panel-handle {
-    position: absolute;
-    left: 0;
-    top: 50%;
-    transform: translateY(-50%);
+    position: relative;
+    flex: 0 0 40px;
     width: 40px;
     height: 40px;
-    background: rgba(0, 0, 0, 0.01);
-    border: none;
+    align-self: center;
+    margin-top: 0;
+    background: rgba(10, 15, 26, 0.75);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-right: none;
+    border-radius: 12px 0 0 12px;
     display: flex;
-    align-items: center;
     justify-content: center;
+    align-items: center;
     cursor: pointer;
     z-index: 10000;
-    color: rgba(255, 255, 255, 0.5);
-    transition: color 0.3s, filter 0.3s, opacity 0.3s cubic-bezier(0.25, 1, 0.5, 1), transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+    color: rgba(255, 255, 255, 0.65);
+    transition: color 0.3s, border-color 0.3s, background 0.3s;
     pointer-events: auto;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
 }
 
 .cog-icon {
-    width: 24px;
-    height: 24px;
-    transition: transform 0.8s cubic-bezier(0.25, 1, 0.5, 1);
+    width: 22px;
+    height: 22px;
+    transition: transform 0.6s cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 .panel-handle:hover {
     color: #00a2ff;
-    filter: drop-shadow(0 0 8px rgba(0, 162, 255, 0.6));
+    border-color: rgba(0, 162, 255, 0.5);
+    background: rgba(10, 15, 26, 0.9);
 }
-
 .panel-handle:hover .cog-icon {
     transform: rotate(180deg);
 }
 
 .panel-content {
-    padding: 24px 20px;
-    width: 300px;
-    height: 100%;
-    overflow-y: auto;
-    background: rgba(10, 15, 26, 0.75);
+    flex: 0 0 320px;
+    width: 320px;
+    height: 600px;
+    padding: 16px 16px;
+    box-sizing: border-box;
+    background: rgba(10, 15, 26, 0.78);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border: 1px solid rgba(255, 255, 255, 0.08);
-    border-right: none;
-    border-radius: 16px 0 0 16px;
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px 0 0 12px;
     box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
-    box-sizing: border-box;
-    transition: opacity 0.3s cubic-bezier(0.25, 1, 0.5, 1), transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
-    opacity: 0;
-    transform: translateX(20px);
+    gap: 0;
+    pointer-events: auto;
+    opacity: 1;
+    transition: opacity 0.3s cubic-bezier(0.25, 1, 0.5, 1);
 }
 
-/* Media Queries for Collapsed/Expanded states based on window width */
-@media (min-width: 101px) {
-    .panel-handle {
-        opacity: 0;
-        transform: translateY(-50%) scale(0.5);
-        pointer-events: none;
-    }
-    .panel-content {
-        opacity: 1;
-        transform: translateX(0);
-    }
+.panel-content > * + * {
+    margin-top: 12px;
 }
 
-@media (max-width: 100px) {
-    .panel-handle {
-        opacity: 1;
-        transform: translateY(-50%) scale(1);
-        pointer-events: auto;
-    }
-    .panel-content {
-        opacity: 0;
-        transform: translateX(20px);
-        pointer-events: none;
-    }
-}
-
-/* Form Styles */
+/* Headers, hr, helpers (unchanged from original) */
 #settingsPanel h3 {
     margin: 0 0 8px 0;
     font-weight: 600;
@@ -145,14 +144,12 @@ canvas {
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
 }
-
 #settingsPanel h4 {
     margin: 0 0 10px 0;
     font-weight: 500;
     font-size: 14px;
     color: #ffffff;
 }
-
 #settingsPanel hr {
     border: 0;
     height: 1px;
@@ -160,13 +157,11 @@ canvas {
     margin: 18px 0;
     width: 100%;
 }
-
 .control-group {
-    margin-bottom: 18px;
+    margin-bottom: 0;
     width: 100%;
     box-sizing: border-box;
 }
-
 .control-group label {
     display: block;
     font-size: 12px;
@@ -175,8 +170,54 @@ canvas {
     color: #8da2fb;
     letter-spacing: 0.02em;
 }
+.control-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.control-row label { margin-bottom: 0; }
 
-/* Custom Dropdown Select */
+/* Theme Scope Hiding */
+#settingsPanel[data-theme-scope="dynamic"] #legacySection { display: none; }
+#settingsPanel[data-theme-scope="legacy"]  #legacySection { display: block; }
+
+/* Buttons */
+.btn-primary {
+    width: 100%;
+    padding: 8px;
+    background: #10b981;
+    border: none;
+    color: #022c22;
+    font-weight: bold;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.2s;
+    font-family: inherit;
+    font-size: 13px;
+}
+.btn-primary:hover { background: #0ea372; }
+.btn-secondary {
+    width: 100%;
+    padding: 8px;
+    background: transparent;
+    border: 1px solid #10b981;
+    color: #10b981;
+    font-weight: bold;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.2s;
+    font-family: inherit;
+    font-size: 13px;
+}
+.btn-secondary:hover { background: rgba(16, 185, 129, 0.08); }
+.status-text {
+    font-size: 11px;
+    color: #888;
+    text-align: center;
+    margin-top: 5px;
+}
+
+/* Custom Dropdown */
 #themeSelector {
     width: 100%;
     padding: 8px 30px 8px 12px !important;
@@ -196,13 +237,12 @@ canvas {
     transition: border-color 0.2s, box-shadow 0.2s;
     box-sizing: border-box;
 }
-
 #themeSelector:focus {
     border-color: #00a2ff !important;
     box-shadow: 0 0 8px rgba(0, 162, 255, 0.2);
 }
 
-/* Custom Range Slider */
+/* Range Slider */
 input[type="range"]#opacitySlider {
     -webkit-appearance: none;
     appearance: none;
@@ -212,11 +252,7 @@ input[type="range"]#opacitySlider {
     margin: 8px 0;
     box-sizing: border-box;
 }
-
-input[type="range"]#opacitySlider:focus {
-    outline: none;
-}
-
+input[type="range"]#opacitySlider:focus { outline: none; }
 input[type="range"]#opacitySlider::-webkit-slider-runnable-track {
     width: 100%;
     height: 4px;
@@ -224,11 +260,9 @@ input[type="range"]#opacitySlider::-webkit-slider-runnable-track {
     border-radius: 2px;
     transition: background 0.3s;
 }
-
 input[type="range"]#opacitySlider:hover::-webkit-slider-runnable-track {
     background: rgba(255, 255, 255, 0.15);
 }
-
 input[type="range"]#opacitySlider::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
@@ -240,13 +274,12 @@ input[type="range"]#opacitySlider::-webkit-slider-thumb {
     box-shadow: 0 0 8px rgba(0, 162, 255, 0.6);
     transition: transform 0.1s, background-color 0.2s;
 }
-
 input[type="range"]#opacitySlider::-webkit-slider-thumb:hover {
     transform: scale(1.25);
     background: #33b5ff;
 }
 
-/* Custom iOS-style Switch Toggle */
+/* iOS Toggle */
 input[type="checkbox"]#analemmaToggle {
     appearance: none;
     -webkit-appearance: none;
@@ -258,12 +291,9 @@ input[type="checkbox"]#analemmaToggle {
     outline: none;
     cursor: pointer;
     transition: background 0.3s;
+    flex-shrink: 0;
 }
-
-input[type="checkbox"]#analemmaToggle:checked {
-    background: #00a2ff;
-}
-
+input[type="checkbox"]#analemmaToggle:checked { background: #00a2ff; }
 input[type="checkbox"]#analemmaToggle::before {
     content: "";
     position: absolute;
@@ -276,12 +306,11 @@ input[type="checkbox"]#analemmaToggle::before {
     transition: transform 0.3s;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
-
 input[type="checkbox"]#analemmaToggle:checked::before {
     transform: translateX(16px);
 }
 
-/* Dynamic List & Entry Fields */
+/* Pin List */
 .pin-item {
     display: flex;
     justify-content: space-between;
@@ -294,12 +323,10 @@ input[type="checkbox"]#analemmaToggle:checked::before {
     transition: background 0.2s, transform 0.2s;
     box-sizing: border-box;
 }
-
 .pin-item:hover {
     background: rgba(255, 255, 255, 0.06);
     transform: translateY(-1px);
 }
-
 .pin-info {
     display: flex;
     flex-direction: column;
@@ -307,7 +334,6 @@ input[type="checkbox"]#analemmaToggle:checked::before {
     flex: 1;
     min-width: 0;
 }
-
 .pin-name {
     font-weight: 500;
     color: #ffffff;
@@ -316,12 +342,10 @@ input[type="checkbox"]#analemmaToggle:checked::before {
     overflow: hidden;
     text-overflow: ellipsis;
 }
-
 .pin-coords {
     color: #7e8da8;
     font-size: 11px;
 }
-
 .delete-btn {
     background: none;
     border: none;
@@ -332,12 +356,10 @@ input[type="checkbox"]#analemmaToggle:checked::before {
     border-radius: 4px;
     transition: color 0.2s, background-color 0.2s;
 }
-
 .delete-btn:hover {
     color: #ff4a4a;
     background-color: rgba(255, 74, 74, 0.1);
 }
-
 .add-pin-form {
     display: flex;
     flex-direction: column;
@@ -345,7 +367,6 @@ input[type="checkbox"]#analemmaToggle:checked::before {
     width: 100%;
     box-sizing: border-box;
 }
-
 .add-pin-form input {
     width: 100%;
     padding: 8px 12px;
@@ -359,17 +380,14 @@ input[type="checkbox"]#analemmaToggle:checked::before {
     font-family: inherit;
     box-sizing: border-box;
 }
-
 .add-pin-form input:focus {
     border-color: #00a2ff;
     box-shadow: 0 0 8px rgba(0, 162, 255, 0.2);
 }
-
 .add-pin-form .row {
     display: flex;
     gap: 6px;
 }
-
 #addPinBtn {
     width: 100%;
     padding: 10px;
@@ -385,13 +403,9 @@ input[type="checkbox"]#analemmaToggle:checked::before {
     box-shadow: 0 4px 12px rgba(0, 129, 255, 0.2);
     transition: transform 0.1s, filter 0.2s, box-shadow 0.2s;
 }
-
 #addPinBtn:hover {
     filter: brightness(1.1);
     box-shadow: 0 4px 16px rgba(0, 129, 255, 0.35);
     transform: translateY(-1px);
 }
-
-#addPinBtn:active {
-    transform: translateY(1px);
-}
+#addPinBtn:active { transform: translateY(1px); }

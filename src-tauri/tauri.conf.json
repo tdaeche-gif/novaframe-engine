@@ -26,8 +26,8 @@
       {
         "label": "settings",
         "title": "Novaframe Controls",
-        "width": 30,
-        "height": 1080,
+        "width": 40,
+        "height": 600,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
@@ -51,7 +51,15 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/**",
+          "$APPLOCALDATA/**",
+          "$APPDATA/themes/**"
+        ]
+      }
     }
   },
   "plugins": {

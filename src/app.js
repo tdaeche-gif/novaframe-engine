@@ -72,57 +72,28 @@ function initDualWindowSystem() {
             }
         }).catch(err => console.error(err));
     } else if (mode === 'settings') {
-        // CONTROLS MODE: Transparent 300px window anchored right
+        // CONTROLS MODE: full-window settings panel (300x600 dock, docked right by Rust).
         document.getElementById('container').style.display = 'none';
         document.body.style.backgroundColor = 'transparent';
-        document.documentElement.style.backgroundColor = 'transparent'; 
-        
-        const panel = document.getElementById('settingsPanel');
-        panel.style.top = '0px';
-        panel.style.height = '100vh';
-        panel.style.left = '0px'; 
-        panel.style.right = 'auto';
-
-        if (window.__TAURI__ && window.__TAURI__.core) {
-            const notifyActive = () => {
-                if (window.__TAURI__ && window.__TAURI__.event) {
-                    window.__TAURI__.event.emit('settings-active', true);
-                }
-            };
-            window.addEventListener('mousemove', notifyActive);
-            window.addEventListener('mousedown', notifyActive);
-            window.addEventListener('keydown', notifyActive);
-
-            let debounceTimeout = null;
-            let targetState = null;
-
-            const debounceAction = (state, actionFn) => {
-                targetState = state;
-                if (debounceTimeout) clearTimeout(debounceTimeout);
-                debounceTimeout = setTimeout(async () => {
-                    if (targetState === state) {
-                        await actionFn();
-                    }
-                }, 16);
-            };
-
-            panel.addEventListener('mouseenter', () => {
-                debounceAction('expanded', async () => {
-                    try { await window.__TAURI__.core.invoke('expand_settings_panel'); } catch (e) { console.error(e); }
-                    notifyActive();
-                });
-            });
-
-            panel.addEventListener('mouseleave', () => {
-                debounceAction('collapsed', async () => {
-                    try { await window.__TAURI__.core.invoke('collapse_settings_panel'); } catch (e) { console.error(e); }
-                    if (window.__TAURI__ && window.__TAURI__.event) {
-                        window.__TAURI__.event.emit('settings-active', false);
-                    }
-                });
-            });
-        }
+        document.documentElement.style.backgroundColor = 'transparent';
+        // Apply current theme scope synchronously so the panel starts in the correct mode.
+        applyThemeScope();
     }
+}
+
+// ── Theme Scope Visibility ─────────────────────────────────────────────────
+// Sets <html data-theme-scope="legacy|dynamic"> so #legacySection hide/show is
+// driven entirely by CSS, no inline styles.  Call this whenever a theme loads,
+// falls back, or is set via UI.
+//
+//   legacy  = Geochron world-map + sun (Internal-Legacy)
+//   dynamic = any external-html / external-canvas theme like Ignis
+function applyThemeScope() {
+    const mode = ThemeManager?.currentManifest?.render_mode === 'internal-legacy'
+        || !ThemeManager?.currentManifest
+        ? 'legacy'
+        : 'dynamic';
+    document.documentElement.dataset.themeScope = mode;
 }
 
 // ── Canvas & context setup ─────────────────────────────────────────────────
@@ -133,107 +104,266 @@ const canvas = document.getElementById('overlayCanvas');
 const ctx = canvas.getContext('2d', { alpha: true });
 
 // ── Theme Manager ──────────────────────────────────────────────────────────
+// Loads one of three render modes per theme:
+//   - "internal-legacy"  : legacy world-map canvas + sun (default if absent)
+//   - "external-html"    : iframe mounted at full viewport, hides canvases
+//   - "external-canvas"  : (future) iframe that paints its own canvas
+//
+// Each theme lives on disk as: <themesDir>/<theme_id>/ + engine_manifest.json
+// The manifest tells us what the entry file is and which render mode to use.
+
+const LEGACY_THEME_DEFAULTS = {
+    mapImageSrc: 'assets/world-map-mercator.jpg',
+    bgColor: '#0f141d',
+    timelineHeight: 40,
+    timelineBgColor: 'rgba(0, 5, 20, 0.78)',
+    timelineTickColor: 'rgba(160, 180, 255, 0.45)',
+    timelineTextColor: '#e0e8ff',
+    shadowColorHex: '0, 8, 24',
+    sunMarkerColor: '#ffd700',
+    sunGlowColor: '#ffaa00',
+    gridColor: 'rgba(255, 255, 255, 0.06)',
+    equatorColor: 'rgba(255, 215, 0, 0.25)',
+    pinColor: '#00a2ff',
+    pinGlowColor: 'rgba(0, 162, 255, 0.5)',
+    pinTextColor: 'rgba(224, 232, 255, 0.75)',
+    shadow_color: '#000000',
+    shadow_opacity: 0.5,
+    show_analemma: true,
+    use_gpu_shader: true
+};
+
 const ThemeManager = {
-    currentTheme: {
-        mapImageSrc: 'assets/world-map-mercator.jpg',
-        bgColor: '#0f141d',
-        timelineHeight: 40,
-        timelineBgColor: 'rgba(0, 5, 20, 0.78)',
-        timelineTickColor: 'rgba(160, 180, 255, 0.45)',
-        timelineTextColor: '#e0e8ff',
-        shadowColorHex: '0, 8, 24', // RGB comma separated for opacity injection
-        sunMarkerColor: '#ffd700',
-        sunGlowColor: '#ffaa00',
-        gridColor: 'rgba(255, 255, 255, 0.06)',
-        equatorColor: 'rgba(255, 215, 0, 0.25)',
-        pinColor: '#00a2ff',
-        pinGlowColor: 'rgba(0, 162, 255, 0.5)',
-        pinTextColor: 'rgba(224, 232, 255, 0.75)',
-        shadow_color: '#000000',
-        shadow_opacity: 0.5,
-        show_analemma: true,
-        use_gpu_shader: true
+    currentTheme: { ...LEGACY_THEME_DEFAULTS },
+    currentManifest: null,   // raw parsed engine_manifest.json of active theme (or null)
+    currentIframe: null,     // <iframe> DOM node for external-html mode, else null
+    currentThemePath: null,  // absolute path string of active theme, or null for legacy
+
+    // Read the theme's manifest from disk. Throws on read failure.
+    async readManifest(themePath) {
+        if (!window.__TAURI__?.core?.convertFileSrc) {
+            throw new Error("Tauri convertFileSrc unavailable");
+        }
+        for (const candidate of ['engine_manifest.json', 'manifest.json']) {
+            const uri = window.__TAURI__.core.convertFileSrc(`${themePath}/${candidate}`);
+            const res = await fetch(uri);
+            if (res.ok) {
+                const m = await res.json();
+                return { manifest: m, manifestFile: candidate };
+            }
+        }
+        throw new Error(`Manifest not found under ${themePath}`);
     },
-    
+
     async loadTheme(themePath) {
         if (!themePath) {
+            // No-op if we're already showing legacy.
+            if (this.currentThemePath === null && !this.currentManifest) return;
             this.fallbackToLegacy();
             return;
         }
 
+        let parsed;
         try {
-            const manifestUri = window.__TAURI__.core.convertFileSrc(`${themePath}/manifest.json`);
-            const response = await fetch(manifestUri);
-            if (!response.ok) throw new Error("Manifest not found at " + manifestUri);
-            
-            const manifest = await response.json();
-            
-            const imageUri = window.__TAURI__.core.convertFileSrc(`${themePath}/${manifest.assets.background_image}`);
-            
+            parsed = await this.readManifest(themePath);
+        } catch (err) {
+            console.error("[Novaframe] Failed to read theme manifest, falling back:", err);
+            this.fallbackToLegacy();
+            return;
+        }
+
+        const manifest = parsed.manifest;
+
+        // Idempotency guard: skip the full render path if the theme is already
+        // active (manifest + path match). Prevents double-mounts when an echo
+        // event re-enters this function before the first call has finished.
+        if (themePath === this.currentThemePath && manifest.theme_id === this.currentManifest?.theme_id) {
+            return;
+        }
+
+        const renderMode = manifest.render_mode || 'internal-legacy';
+
+        this.currentManifest = manifest;
+        this.currentThemePath = themePath;
+
+        if (renderMode === 'internal-legacy') {
+            await this.loadInternalLegacy(themePath, manifest);
+        } else if (renderMode === 'external-html' || renderMode === 'external-canvas') {
+            await this.loadExternalHtml(themePath, manifest, renderMode);
+        } else {
+            console.error(`[Novaframe] Unknown render_mode "${renderMode}", falling back`);
+            this.fallbackToLegacy();
+            return;
+        }
+
+        applyThemeScope();
+        await ConfigManager.setTheme(themePath);
+    },
+
+    async loadInternalLegacy(themePath, manifest) {
+        // Tear down any iframe from previous external mode
+        this.unmountIframe();
+
+        // Only honor legacy `assets.background_image` + `render_engine` shape.
+        // New wallpapers that declare `render_mode: "external-html"` skip this path.
+        const bgImage = manifest.assets?.background_image;
+        if (bgImage) {
+            const imageUri = window.__TAURI__.core.convertFileSrc(`${themePath}/${bgImage}`);
             const imgResponse = await fetch(imageUri, { method: 'HEAD' });
             if (!imgResponse.ok) throw new Error("Map image missing at " + imageUri);
-
-            this.currentTheme = {
-                ...this.currentTheme,
-                ...manifest.settings
-            };
+            this.currentTheme = { ...LEGACY_THEME_DEFAULTS, ...(manifest.settings || {}) };
             this.currentTheme.mapImageSrc = imageUri;
-
-            // Load external shader sources if the theme declares a render_engine block
-            if (manifest.render_engine && manifest.render_engine.vertex_shader && manifest.render_engine.fragment_shader) {
-                const vertUri = window.__TAURI__.core.convertFileSrc(`${themePath}/${manifest.render_engine.vertex_shader}`);
-                const fragUri = window.__TAURI__.core.convertFileSrc(`${themePath}/${manifest.render_engine.fragment_shader}`);
-                const [vertRes, fragRes] = await Promise.all([fetch(vertUri), fetch(fragUri)]);
-                if (!vertRes.ok) throw new Error("Vertex shader missing at " + vertUri);
-                if (!fragRes.ok) throw new Error("Fragment shader missing at " + fragUri);
-                glShaderSources.vert = await vertRes.text();
-                glShaderSources.frag = await fragRes.text();
-                glInitialized = false; // Force WebGL re-init with new shader sources
-                console.log("[Novaframe] External shaders loaded from theme:", manifest.render_engine);
-            } else {
-                glShaderSources.vert = null; // Reset to inline fallback
-                glShaderSources.frag = null;
-            }
-            
-            this.applyThemeToDOM();
-            await ConfigManager.setTheme(themePath);
-        } catch (err) {
-            console.error("[Novaframe] Theme load failed, gracefully falling back to legacy internal map:", err);
-            this.fallbackToLegacy();
+        } else {
+            // No custom asset — just apply settings overrides, keep default map.
+            this.currentTheme = { ...LEGACY_THEME_DEFAULTS, ...(manifest.settings || {}) };
         }
-    },
-    
-    fallbackToLegacy() {
-        this.currentTheme = {
-            mapImageSrc: 'assets/world-map-mercator.jpg',
-            bgColor: '#0f141d',
-            timelineHeight: 40,
-            timelineBgColor: 'rgba(0, 5, 20, 0.78)',
-            timelineTickColor: 'rgba(160, 180, 255, 0.45)',
-            timelineTextColor: '#e0e8ff',
-            shadowColorHex: '0, 8, 24',
-            sunMarkerColor: '#ffd700',
-            sunGlowColor: '#ffaa00',
-            gridColor: 'rgba(255, 255, 255, 0.06)',
-            equatorColor: 'rgba(255, 215, 0, 0.25)',
-            pinColor: '#00a2ff',
-            pinGlowColor: 'rgba(0, 162, 255, 0.5)',
-            pinTextColor: 'rgba(224, 232, 255, 0.75)',
-            shadow_color: '#000000',
-            shadow_opacity: 0.5,
-            show_analemma: true,
-            use_gpu_shader: true
-        };
+
+        // Optional external shader sources
+        if (manifest.render_engine?.vertex_shader && manifest.render_engine?.fragment_shader) {
+            const vertUri = window.__TAURI__.core.convertFileSrc(`${themePath}/${manifest.render_engine.vertex_shader}`);
+            const fragUri = window.__TAURI__.core.convertFileSrc(`${themePath}/${manifest.render_engine.fragment_shader}`);
+            const [vertRes, fragRes] = await Promise.all([fetch(vertUri), fetch(fragUri)]);
+            if (!vertRes.ok) throw new Error("Vertex shader missing");
+            if (!fragRes.ok) throw new Error("Fragment shader missing");
+            glShaderSources.vert = await vertRes.text();
+            glShaderSources.frag = await fragRes.text();
+            glInitialized = false;
+        } else {
+            glShaderSources.vert = null;
+            glShaderSources.frag = null;
+        }
+
         this.applyThemeToDOM();
+        showCanvases();
+    },
+
+    async loadExternalHtml(themePath, manifest) {
+        const entry = manifest.entry || 'index.html';
+        const fileSrc = window.__TAURI__.core.convertFileSrc(`${themePath}/${entry}`);
+        const transparent = manifest.transparent !== false; // default true
+        this.mountIframe(fileSrc, transparent);
+        hideCanvases();
+    },
+
+    mountIframe(src, transparent) {
+        this.unmountIframe();
+        const container = document.getElementById('container');
+        if (!container) return;
+        const iframe = document.createElement('iframe');
+        iframe.id = 'themeFrame';
+        iframe.src = src;
+        iframe.setAttribute('allow', 'autoplay; fullscreen');
+        iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups allow-forms');
+        Object.assign(iframe.style, {
+            position: 'absolute',
+            top: '0', left: '0',
+            width: '100%', height: '100%',
+            border: '0',
+            backgroundColor: transparent ? 'transparent' : '#000',
+            zIndex: '5',
+            pointerEvents: 'auto'
+        });
+
+        // Helper to push the host viewport descriptor to the iframe. The theme
+        // listens for these messages to size its canvas / shaders correctly so
+        // there are no letterbox black bars regardless of screen resolution.
+        const postViewport = (msgType = 'novaframe-theme-ready') => {
+            try {
+                const cw = iframe.contentWindow;
+                if (!cw) return;
+                const w = cw.innerWidth  || container.clientWidth;
+                const h = cw.innerHeight || container.clientHeight;
+                const dpr = cw.devicePixelRatio || window.devicePixelRatio || 1;
+                cw.postMessage({
+                    type: msgType,
+                    transparent,
+                    width: w,
+                    height: h,
+                    dpr
+                }, '*');
+            } catch (e) {}
+        };
+
+        iframe.addEventListener('load', () => {
+            postViewport('novaframe-theme-ready');
+            // Some themes read sizes before their RAFs settle — push once more
+            // after the next paint to be safe.
+            requestAnimationFrame(() => postViewport('novaframe-theme-ready'));
+        });
+
+        // The settings-panel slide animation resizes the main window. We don't
+        // currently do that, but keep the listener in case future layout
+        // changes cause viewport shifts.
+        const resizeObserver = new ResizeObserver(() => postViewport('novaframe-theme-resize'));
+        resizeObserver.observe(iframe);
+
+        // Save the postViewport closure for cleanup on unmount.
+        iframe._novaframeResizeCleanup = () => resizeObserver.disconnect();
+
+        container.appendChild(iframe);
+        this.currentIframe = iframe;
+    },
+
+    unmountIframe() {
+        if (this.currentIframe) {
+            try { this.currentIframe._novaframeResizeCleanup?.(); } catch (_) {}
+            if (this.currentIframe.parentNode) {
+                this.currentIframe.parentNode.removeChild(this.currentIframe);
+            }
+        }
+        this.currentIframe = null;
+    },
+
+    fallbackToLegacy() {
+        this.unmountIframe();
+        this.currentManifest = null;
+        this.currentTheme = { ...LEGACY_THEME_DEFAULTS };
+        this.applyThemeToDOM();
+        showCanvases();
+        this.currentThemePath = null;
+        applyThemeScope();
+        // Persist the absence of an active theme so scanThemes auto-select can fire.
         ConfigManager.setTheme(null);
     },
 
     applyThemeToDOM() {
-        mapImage.src = this.currentTheme.mapImageSrc;
+        // Only relevant for internal-legacy mode; external-html mode hides canvases.
+        if (this.currentTheme.mapImageSrc) {
+            mapImage.src = this.currentTheme.mapImageSrc;
+        }
         document.documentElement.style.backgroundColor = this.currentTheme.bgColor;
         document.body.style.backgroundColor = this.currentTheme.bgColor;
     }
 };
+
+// ── Canvas visibility helpers ──────────────────────────────────────────────
+function hideCanvases() {
+    const c1 = document.getElementById('novaframeCanvas');
+    const c2 = document.getElementById('overlayCanvas');
+    if (c1) c1.style.display = 'none';
+    if (c2) c2.style.display = 'none';
+}
+function showCanvases() {
+    const c1 = document.getElementById('novaframeCanvas');
+    const c2 = document.getElementById('overlayCanvas');
+    if (c1) c1.style.display = '';
+    if (c2) c2.style.display = '';
+}
+
+// ── Mouse passthrough to iframe (for interactive themes like Ignis) ────────
+window.addEventListener('mousemove', (e) => {
+    const iframe = ThemeManager?.currentIframe;
+    if (!iframe?.contentWindow) return;
+    try {
+        iframe.contentWindow.postMessage({
+            type: 'novaframe-pointer',
+            x: e.clientX, y: e.clientY,
+            // Normalized 0-1 for theme authors
+            nx: e.clientX / window.innerWidth,
+            ny: e.clientY / window.innerHeight
+        }, '*');
+    } catch (_) {}
+});
 
 const mapImage = new Image();
 const cityLightsImage = new Image();
@@ -381,22 +511,27 @@ const ConfigManager = {
             }
             
             config = (await this.store.get('novaframe_config')) || DEFAULT_CONFIG;
-            
-            // Periodically sync config in wallpaper mode if changed from settings panel
-            setInterval(async () => {
-                const latestConfig = await this.store.get('novaframe_config');
-                if (latestConfig) config = latestConfig;
-                
-                // Theme sync
-                const latestTheme = await this.store.get('activeTheme');
-                const normLatest = latestTheme || null;
-                const normCurrent = ThemeManager.currentThemePath || null;
-                if (normLatest !== normCurrent) {
-                    ThemeManager.currentThemePath = normLatest;
-                    ThemeManager.loadTheme(normLatest);
-                }
-            }, 1000);
-            
+
+            // Only the main window needs to poll the store for cross-window
+            // config/theme changes. The settings window wrote the change — it
+            // already knows. Both windows polling causes the theme to flicker as
+            // each poll detects "changed" and triggers another loadTheme.
+            const isMainWindow = window.location.search.includes('mode=main');
+            if (isMainWindow) {
+                setInterval(async () => {
+                    const latestConfig = await this.store.get('novaframe_config');
+                    if (latestConfig) config = latestConfig;
+
+                    const latestTheme = await this.store.get('activeTheme');
+                    const normLatest = latestTheme || null;
+                    const normCurrent = ThemeManager.currentThemePath || null;
+                    if (normLatest !== normCurrent) {
+                        ThemeManager.currentThemePath = normLatest;
+                        ThemeManager.loadTheme(normLatest);
+                    }
+                }, 1000);
+            }
+
         } catch (e) {
             console.error("[ConfigManager] Native store failed:", e);
             config = JSON.parse(localStorage.getItem('novaframe_config')) || DEFAULT_CONFIG;
@@ -411,40 +546,52 @@ const ConfigManager = {
 
         if (window.__TAURI__ && window.__TAURI__.event) {
             try {
-                if (window.__TAURI__.event.emitTo) {
-                    await window.__TAURI__.event.emitTo('main', 'config-changed', config);
-                } else {
-                    await window.__TAURI__.event.emit('config-changed', config);
-                }
+                await window.__TAURI__.event.emit('config-changed', config);
             } catch (e) {
                 console.error("[Novaframe] Config emit failed:", e);
             }
         }
     },
     async getTheme() {
-        if (this.store) return await this.store.get('activeTheme');
+        // Prefer the persistent native store, but fall back to localStorage if
+        // the store hasn't been seeded yet (e.g. on the very first reload after
+        // a fresh install — tauri-plugin-store save() can return before the
+        // JSON file is flushed, so reading immediately after window.location.reload()
+        // can return undefined). localStorage is sync and survives reload, so it's
+        // a reliable source of truth in that narrow window.
+        if (this.store) {
+            const fromStore = await this.store.get('activeTheme');
+            if (fromStore) return fromStore;
+        }
         return localStorage.getItem('activeTheme');
     },
     async setTheme(themePath) {
-        ThemeManager.currentThemePath = themePath;
+        // Normalize empty string to null so we have one canonical "no theme" value.
+        const next = themePath || null;
+
+        // Skip writes + emits when the value hasn't actually changed.
+        // Without this, every theme-changed listener that calls setTheme in
+        // response to its own broadcast creates a feedback loop that flickers
+        // the canvas and toggles #legacySection in the settings panel.
+        if (next === ThemeManager.currentThemePath) return;
+        ThemeManager.currentThemePath = next;
+
         if (this.store) {
-            if (themePath) await this.store.set('activeTheme', themePath);
+            if (next) await this.store.set('activeTheme', next);
             else await this.store.delete('activeTheme');
             await this.store.save();
         }
-        if (themePath) {
-            localStorage.setItem('activeTheme', themePath);
+        if (next) {
+            localStorage.setItem('activeTheme', next);
         } else {
             localStorage.removeItem('activeTheme');
         }
 
         if (window.__TAURI__ && window.__TAURI__.event) {
             try {
-                if (window.__TAURI__.event.emitTo) {
-                    await window.__TAURI__.event.emitTo('main', 'theme-changed', themePath);
-                } else {
-                    await window.__TAURI__.event.emit('theme-changed', themePath);
-                }
+                // Broadcast to all windows. The listener now dedupes against
+                // currentThemePath so echoes don't trigger re-renders.
+                await window.__TAURI__.event.emit('theme-changed', next);
             } catch (e) {
                 console.error("[Novaframe] Theme emit failed:", e);
             }
@@ -495,12 +642,33 @@ const citiesDb = [
     { name: "Reykjavik", lat: 64.1466, lon: -21.9426 }
 ];
 
+async function applyThemeScopeFromStore() {
+    try {
+        const themePath = await ConfigManager.getTheme();
+        let scope = 'legacy';
+        if (themePath) {
+            try {
+                const { manifest } = await ThemeManager.readManifest(themePath);
+                scope = (manifest.render_mode === 'internal-legacy') ? 'legacy' : 'dynamic';
+            } catch (_) {
+                scope = 'dynamic'; // unreadable manifest → conservative hide
+            }
+        }
+        const panel = document.getElementById('settingsPanel');
+        if (panel) panel.dataset.themeScope = scope;
+        document.documentElement.dataset.themeScope = scope;
+    } catch (e) {
+        console.warn('[settings] applyThemeScopeFromStore failed:', e);
+    }
+}
+
 // ── Bind UI Event Listeners ───────────────────────────────────────────────
 function initSettingsUI() {
+    applyThemeScopeFromStore();
     const opacitySlider = document.getElementById('opacitySlider'); //
     const pinsList = document.getElementById('pinsList'); //
     const addPinBtn = document.getElementById('addPinBtn'); //
-    
+
     // Set initial structural UI values
     opacitySlider.value = config.shadowOpacity; //
     
@@ -621,19 +789,45 @@ async function scanThemes() {
             const isDir = entry.isDirectory === true || Array.isArray(entry.children);
             if (isDir && entry.name) {
                 const themePath = `${themesDir}/${entry.name}`;
+                // Peek manifest for a friendly label and a render_mode tag
+                let label = entry.name;
+                let mode = 'unknown';
+                try {
+                    const { manifest } = await ThemeManager.readManifest(themePath);
+                    if (manifest.name) label = `${manifest.name}`;
+                    mode = manifest.render_mode || 'internal-legacy';
+                } catch (_) {
+                    // Skip dirs without a valid manifest — they aren't loadable themes.
+                    continue;
+                }
                 const option = document.createElement('option');
                 option.value = themePath;
-                option.textContent = entry.name;
+                option.dataset.renderMode = mode;
+                // Suffix the mode label so power users can tell at a glance
+                const modeTag = mode === 'external-html' ? ' (html)' : mode === 'external-canvas' ? ' (canvas)' : '';
+                option.textContent = `${label}${modeTag}`;
                 selector.appendChild(option);
             }
         }
-        
+
         const activeTheme = await ConfigManager.getTheme();
         console.log("[Novaframe] Active theme from config:", activeTheme);
         if (activeTheme) {
             selector.value = activeTheme;
             if (selector.value !== activeTheme) {
                 console.warn("[Novaframe] Active theme not in dropdown — was it installed correctly?", activeTheme);
+            }
+        } else {
+            // No active theme persisted yet — if exactly one theme is on disk,
+            // auto-select it. This handles the first-time reload after a fresh
+            // install where the store hadn't been flushed before reload.
+            const options = selector.querySelectorAll('option');
+            const themeOptions = Array.from(options).filter(o => o.value !== '');
+            if (themeOptions.length === 1) {
+                console.log("[Novaframe] Auto-selecting the only available theme:", themeOptions[0].value);
+                selector.value = themeOptions[0].value;
+                await ConfigManager.setTheme(themeOptions[0].value);
+                ThemeManager.loadTheme(themeOptions[0].value);
             }
         }
         
@@ -674,17 +868,22 @@ async function scanThemes() {
                 if (response.ok && data.success) {
                     const wallpaperId = data.wallpaper.id;
                     const downloadUrl = data.wallpaper.downloadUrl;
-                    console.log(TAG, stamp, 'verify-token OK. wallpaperId=', wallpaperId, 'downloadUrl length=', downloadUrl?.length ?? 0);
+                    const wallpaperTitle = data.wallpaper.title;
+                    console.log(TAG, stamp, 'verify-token OK. wallpaperId=', wallpaperId, 'title=', JSON.stringify(wallpaperTitle), 'downloadUrl length=', downloadUrl?.length ?? 0);
 
                     // Call the Rust command to download and install the theme
-                    console.log(TAG, stamp, `Invoking Rust download_and_install_theme theme_id=${wallpaperId} ...`);
+                    console.log(TAG, stamp, `Invoking Rust download_and_install_theme themeId=${wallpaperId} title=${wallpaperTitle} ...`);
                     let installedThemeId;
                     try {
+                        // Tauri v2 serializes Rust function arguments as camelCase on the
+                        // JS side. Rust declares `theme_id` / `wallpaper_title` but the JS
+                        // keys must be camelCase: `themeId` / `wallpaperTitle`.
                         installedThemeId = await window.__TAURI__.core.invoke('download_and_install_theme', {
                             url: downloadUrl,
-                            theme_id: wallpaperId
+                            themeId: wallpaperId,
+                            wallpaperTitle: wallpaperTitle
                         });
-                        console.log(TAG, stamp, `✅ Rust install returned theme_id=${installedThemeId}`);
+                        console.log(TAG, stamp, `✅ Rust install returned dir=${installedThemeId}`);
                     } catch (rustErr) {
                         console.error(TAG, stamp, '❌ Rust download_and_install_theme rejected:', rustErr);
                         alert('Engine install command rejected: ' + (rustErr?.message ?? rustErr));
@@ -718,19 +917,36 @@ async function scanThemes() {
 
     selector.addEventListener('change', async (e) => {
         const selected = e.target.value;
+        // Persist + broadcast. The broadcast fans out to all windows; the
+        // settings-window listener will update its own dropdown highlight +
+        // scope when it echoes back. The main-window listener will re-render.
         await ConfigManager.setTheme(selected);
     });
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+    // Apply initial scope before settings UI bootstraps so the panel renders correctly.
+    applyThemeScope();
+
+    // Surface uncaught JS errors to Rust logs (visible in `tauri dev` console)
+    // so we don't need DevTools attached to diagnose runtime failures.
+    const reportErr = (label, info) => {
+        try {
+            if (window.__TAURI__?.core?.invoke) {
+                window.__TAURI__.core.invoke('log_from_js', {
+                    message: `[${label}] ${info?.stack || info?.message || String(info)}`
+                });
+            }
+        } catch (_) {}
+    };
+    window.addEventListener('error', (e) => reportErr('window.error', e.error || e.message));
+    window.addEventListener('unhandledrejection', (e) => reportErr('unhandledrejection', e.reason));
+
     // Standalone Storage Fallback listener (cross-origin browser support)
     window.addEventListener('storage', (e) => {
         if (e.key === 'activeTheme') {
             const newTheme = e.newValue || null;
-            if (newTheme !== ThemeManager.currentThemePath) {
-                ThemeManager.currentThemePath = newTheme;
-                ThemeManager.loadTheme(newTheme);
-            }
+            ThemeManager.loadTheme(newTheme);
         } else if (e.key === 'novaframe_config') {
             try {
                 if (e.newValue) {
@@ -744,15 +960,42 @@ document.addEventListener('DOMContentLoaded', async () => {
         await verifyAndProvisionAppData();
         await ConfigManager.init();
         initDualWindowSystem();
-        initSettingsUI();
+
+        // Settings UI only exists in the settings (controls) window. Mounting
+        // it on the main window would render an unused overlay whose cog is
+        // also unreachable behind the wallpaper iframe.
+        const isSettingsWindow = window.location.search.includes('mode=settings');
+        if (isSettingsWindow) {
+            initSettingsUI();
+        }
 
         if (window.__TAURI__.event) {
             // Inter-window event triggers
-            window.__TAURI__.event.listen('theme-changed', (event) => {
+            window.__TAURI__.event.listen('theme-changed', async (event) => {
                 const newTheme = event.payload || null;
-                if (newTheme !== ThemeManager.currentThemePath) {
-                    ThemeManager.currentThemePath = newTheme;
+                const isMainWindow = window.location.search.includes('mode=main');
+
+                if (isMainWindow) {
+                    // Skip if theme hasn't actually changed — guards against
+                    // echo loops where the same window receives its own broadcast
+                    // back. ThemeManager.loadTheme has its own idempotency guard.
+                    if (newTheme === ThemeManager.currentThemePath) return;
                     ThemeManager.loadTheme(newTheme);
+                } else {
+                    // Settings window: ALWAYS mirror the new state. Echoes are
+                    // cheap here because we never touch the iframe / canvases.
+                    ThemeManager.currentThemePath = newTheme;
+                    const selector = document.getElementById('themeSelector');
+                    if (selector) selector.value = newTheme || '';
+                    try {
+                        const manifest = newTheme
+                            ? (await ThemeManager.readManifest(newTheme)).manifest
+                            : null;
+                        ThemeManager.currentManifest = manifest;
+                    } catch (_) {
+                        ThemeManager.currentManifest = null;
+                    }
+                    applyThemeScopeFromStore();
                 }
             });
 
