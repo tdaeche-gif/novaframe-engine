@@ -654,47 +654,66 @@ async function scanThemes() {
 
     if (window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen) {
         window.__TAURI__.event.listen('engine-apply-theme', async (event) => {
-            const token = event.payload;
+            const TAG = '[Main]';
+            const stamp = `[${Date.now() % 100000}]`;
+            const token = event?.payload;
+            console.log(TAG, stamp, 'engine-apply-theme listener fired. payload type:', typeof token, 'length:', token?.length ?? 'null');
             console.log("[Novaframe] Received apply theme request from deep link with token:", token);
-            
+
             try {
+                console.log(TAG, stamp, 'POST /api/engine/verify-token ...');
                 const response = await fetch('https://api.novaframe.co.uk/api/engine/verify-token', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ token })
                 });
-                
+                console.log(TAG, stamp, 'verify-token responded with HTTP', response.status);
+
                 const data = await response.json();
-                
+
                 if (response.ok && data.success) {
                     const wallpaperId = data.wallpaper.id;
                     const downloadUrl = data.wallpaper.downloadUrl;
-                    
+                    console.log(TAG, stamp, 'verify-token OK. wallpaperId=', wallpaperId, 'downloadUrl length=', downloadUrl?.length ?? 0);
+
                     // Call the Rust command to download and install the theme
-                    console.log(`[Novaframe] Invoking Rust to download and install theme ${wallpaperId}...`);
-                    const installedThemeId = await window.__TAURI__.core.invoke('download_and_install_theme', { 
-                        url: downloadUrl,
-                        theme_id: wallpaperId
-                    });
-                    
+                    console.log(TAG, stamp, `Invoking Rust download_and_install_theme theme_id=${wallpaperId} ...`);
+                    let installedThemeId;
+                    try {
+                        installedThemeId = await window.__TAURI__.core.invoke('download_and_install_theme', {
+                            url: downloadUrl,
+                            theme_id: wallpaperId
+                        });
+                        console.log(TAG, stamp, `✅ Rust install returned theme_id=${installedThemeId}`);
+                    } catch (rustErr) {
+                        console.error(TAG, stamp, '❌ Rust download_and_install_theme rejected:', rustErr);
+                        alert('Engine install command rejected: ' + (rustErr?.message ?? rustErr));
+                        return;
+                    }
+
                     console.log(`[Novaframe] Theme ${installedThemeId} installed successfully! Loading it...`);
-                    
+
                     // Switch to the newly installed theme
                     const themesDir = await getThemesDir();
                     const absoluteThemePath = `${themesDir}/${installedThemeId}`;
                     await ConfigManager.setTheme(absoluteThemePath);
-                    
+                    console.log(TAG, stamp, 'ConfigManager.setTheme ok. Reloading main window...');
+
                     // Full reload — scanThemes() will re-run on load and select the new theme
                     window.location.reload();
                 } else {
+                    console.error(TAG, stamp, 'verify-token returned !ok || !success:', data);
                     console.error("Token verification failed:", data.error);
                     alert("License Verification Failed: " + data.error);
                 }
             } catch (err) {
+                console.error(TAG, stamp, '❌ exception in listener:', err);
                 console.error("Error verifying token:", err);
                 alert("Error verifying license token.");
             }
         });
+    } else {
+        console.error('[Main] window.__TAURI__.event.listen is NOT available. The event cannot be received.');
     }
 
     selector.addEventListener('change', async (e) => {

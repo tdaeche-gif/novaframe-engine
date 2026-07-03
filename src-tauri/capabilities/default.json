@@ -5,6 +5,9 @@
   "windows": ["main", "settings", "storefront"],
   "permissions": [
     "core:default",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "opener:default",
     "fs:default",
     "store:default",
