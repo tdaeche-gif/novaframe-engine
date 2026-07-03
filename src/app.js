@@ -19,37 +19,24 @@ async function verifyAndProvisionAppData() {
     if (!tauriFs) return;
 
     try {
-        const baseDir = tauriFs.BaseDirectory;
-        const appData = baseDir.AppData;
+        const themesDir = await getThemesDir();
 
-        // Check if themes/mercator-classic exists in AppData
-        const hasTheme = await tauriFs.exists("themes/mercator-classic", { baseDir: appData });
-        if (!hasTheme) {
-            console.log("[Novaframe] Provisioning default theme to AppData...");
-            
-            // Create target folders recursively
-            await tauriFs.mkdir("themes/mercator-classic", { baseDir: appData, recursive: true });
-            
-            // Fetch default manifest.json from local build folder assets
-            const manifestRes = await fetch("themes/mercator-classic/manifest.json");
-            if (!manifestRes.ok) throw new Error("manifest.json not found in bundle");
-            const manifestText = await manifestRes.text();
-            
-            // Write manifest.json to AppData
-            await tauriFs.writeTextFile("themes/mercator-classic/manifest.json", manifestText, { baseDir: appData });
-            
-            // Fetch default map image
-            const mapRes = await fetch("themes/mercator-classic/world-map-mercator.jpg");
-            if (!mapRes.ok) throw new Error("world-map-mercator.jpg not found in bundle");
-            const mapBuf = await mapRes.arrayBuffer();
-            
-            // Write map image to AppData
-            await tauriFs.writeFile("themes/mercator-classic/world-map-mercator.jpg", new Uint8Array(mapBuf), { baseDir: appData });
-            
-            console.log("[Novaframe] Default theme provisioned successfully in AppData.");
+        // ── Fix #4: Clean up empty mercator-classic folder ────────────────────
+        // If mercator-classic was created empty (from a prior failed provision), remove it.
+        // An empty folder appears in the dropdown but has no manifest → always falls back to Internal-Legacy.
+        const mercatorPath = `${themesDir}/mercator-classic`;
+        try {
+            const files = await tauriFs.readDir(mercatorPath);
+            if (!files || files.length === 0) {
+                console.log("[Novaframe] Removing empty mercator-classic folder from AppData...");
+                await tauriFs.remove(mercatorPath, { recursive: true });
+            }
+        } catch (e) {
+            // Folder doesn't exist yet — that's fine
         }
+
     } catch (err) {
-        console.error("[Novaframe] Failed to provision default theme in AppData:", err);
+        console.error("[Novaframe] Failed to verify AppData:", err);
     }
 }
 
@@ -624,23 +611,30 @@ async function scanThemes() {
     
     try {
         const themesDir = await getThemesDir();
+        console.log("[Novaframe] Scanning themes directory:", themesDir);
         const entries = await tauriFs.readDir(themesDir);
+        console.log("[Novaframe] Found entries:", entries);
         
         for (const entry of entries) {
-            if (entry.isDirectory) {
+            // Fix #2: Tauri v2 plugin-fs uses entry.isDirectory (boolean).
+            // Tauri v1 used entry.children (array). Support both shapes.
+            const isDir = entry.isDirectory === true || Array.isArray(entry.children);
+            if (isDir && entry.name) {
                 const themePath = `${themesDir}/${entry.name}`;
-                try {
-                    const option = document.createElement('option');
-                    option.value = themePath;
-                    option.textContent = entry.name;
-                    selector.appendChild(option);
-                } catch(e) {}
+                const option = document.createElement('option');
+                option.value = themePath;
+                option.textContent = entry.name;
+                selector.appendChild(option);
             }
         }
         
         const activeTheme = await ConfigManager.getTheme();
+        console.log("[Novaframe] Active theme from config:", activeTheme);
         if (activeTheme) {
             selector.value = activeTheme;
+            if (selector.value !== activeTheme) {
+                console.warn("[Novaframe] Active theme not in dropdown — was it installed correctly?", activeTheme);
+            }
         }
         
     } catch (e) {
@@ -690,14 +684,7 @@ async function scanThemes() {
                     const absoluteThemePath = `${themesDir}/${installedThemeId}`;
                     await ConfigManager.setTheme(absoluteThemePath);
                     
-                    // Force UI refresh of the theme list
-                    const select = document.getElementById('theme-select');
-                    if (select) {
-                        const evt = new Event('change');
-                        select.dispatchEvent(evt);
-                    }
-                    
-                    // Full reload to guarantee shaders pick up the new theme
+                    // Full reload — scanThemes() will re-run on load and select the new theme
                     window.location.reload();
                 } else {
                     console.error("Token verification failed:", data.error);
@@ -753,17 +740,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             window.__TAURI__.event.listen('theme-installed', async (event) => {
                 const absoluteThemePath = event.payload;
                 console.log("[Novaframe] Received theme-installed event with path:", absoluteThemePath);
-                
                 await ConfigManager.setTheme(absoluteThemePath);
-                
-                // Force UI refresh of the theme list
-                const select = document.getElementById('theme-select');
-                if (select) {
-                    const evt = new Event('change');
-                    select.dispatchEvent(evt);
-                }
-                
-                // Full reload to guarantee shaders pick up the new theme
+                // Full reload — scanThemes() will re-run and select the newly installed theme
                 window.location.reload();
             });
 
