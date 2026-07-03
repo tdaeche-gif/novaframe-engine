@@ -138,6 +138,7 @@ const ThemeManager = {
     currentManifest: null,   // raw parsed engine_manifest.json of active theme (or null)
     currentIframe: null,     // <iframe> DOM node for external-html mode, else null
     currentThemePath: null,  // absolute path string of active theme, or null for legacy
+    manifestCache: {},       // in-memory cache for render_mode mapped by themePath
 
     // Read the theme's manifest from disk. Throws on read failure.
     async readManifest(themePath) {
@@ -642,29 +643,38 @@ const citiesDb = [
     { name: "Reykjavik", lat: 64.1466, lon: -21.9426 }
 ];
 
-async function applyThemeScopeFromStore() {
-    try {
-        const themePath = await ConfigManager.getTheme();
-        let scope = 'legacy';
-        if (themePath) {
-            try {
-                const { manifest } = await ThemeManager.readManifest(themePath);
-                scope = (manifest.render_mode === 'internal-legacy') ? 'legacy' : 'dynamic';
-            } catch (_) {
-                scope = 'dynamic'; // unreadable manifest → conservative hide
-            }
-        }
-        const panel = document.getElementById('settingsPanel');
-        if (panel) panel.dataset.themeScope = scope;
-        document.documentElement.dataset.themeScope = scope;
-    } catch (e) {
-        console.warn('[settings] applyThemeScopeFromStore failed:', e);
+// ── Settings Synchronous Updater ─────────────────────────────────────────
+function updateSettingsScope(themePath) {
+    const selector = document.getElementById('themeSelector');
+    if (selector) selector.value = themePath || '';
+    
+    let mode = 'internal-legacy'; // fallback
+    if (themePath && ThemeManager.manifestCache[themePath]) {
+        mode = ThemeManager.manifestCache[themePath].mode;
     }
+    
+    const scope = (mode === 'internal-legacy') ? 'legacy' : 'dynamic';
+    const panel = document.getElementById('settingsPanel');
+    if (panel) panel.dataset.themeScope = scope;
+    document.documentElement.dataset.themeScope = scope;
 }
 
 // ── Bind UI Event Listeners ───────────────────────────────────────────────
-function initSettingsUI() {
-    applyThemeScopeFromStore();
+async function initSettingsUI() {
+    // 1. Scan and cache all available themes
+    await scanThemes();
+    
+    // 2. Fetch active theme from store
+    const activeTheme = await ConfigManager.getTheme();
+    console.log("[Novaframe] Active theme from config:", activeTheme);
+    if (activeTheme && document.getElementById('themeSelector')) {
+        const selector = document.getElementById('themeSelector');
+        selector.value = activeTheme;
+    }
+    
+    // 3. Synchronously apply UI layout scoping
+    updateSettingsScope(activeTheme);
+
     const opacitySlider = document.getElementById('opacitySlider'); //
     const pinsList = document.getElementById('pinsList'); //
     const addPinBtn = document.getElementById('addPinBtn'); //
@@ -764,7 +774,6 @@ function initSettingsUI() {
     });
     
     renderUIList();
-    scanThemes();
 }
 
 // ── Dynamic Theme Scanner (Module 1) ───────────────────────────────────────
@@ -800,6 +809,10 @@ async function scanThemes() {
                     // Skip dirs without a valid manifest — they aren't loadable themes.
                     continue;
                 }
+                
+                // Save to in-memory cache
+                ThemeManager.manifestCache[themePath] = { label, mode };
+
                 const option = document.createElement('option');
                 option.value = themePath;
                 option.dataset.renderMode = mode;
@@ -985,17 +998,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     // Settings window: ALWAYS mirror the new state. Echoes are
                     // cheap here because we never touch the iframe / canvases.
                     ThemeManager.currentThemePath = newTheme;
-                    const selector = document.getElementById('themeSelector');
-                    if (selector) selector.value = newTheme || '';
-                    try {
-                        const manifest = newTheme
-                            ? (await ThemeManager.readManifest(newTheme)).manifest
-                            : null;
-                        ThemeManager.currentManifest = manifest;
-                    } catch (_) {
-                        ThemeManager.currentManifest = null;
-                    }
-                    applyThemeScopeFromStore();
+                    updateSettingsScope(newTheme);
                 }
             });
 
