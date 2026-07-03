@@ -290,6 +290,17 @@ const ThemeManager = {
             // Some themes read sizes before their RAFs settle — push once more
             // after the next paint to be safe.
             requestAnimationFrame(() => postViewport('novaframe-theme-ready'));
+
+            // Dispatch saved theme settings if they exist
+            if (config.theme_settings && config.theme_settings[absoluteThemePath]) {
+                const settings = config.theme_settings[absoluteThemePath];
+                try {
+                    iframe.contentWindow.postMessage({
+                        type: 'novaframe-settings',
+                        settings
+                    }, '*');
+                } catch (_) {}
+            }
         });
 
         // The settings-panel slide animation resizes the main window. We don't
@@ -466,7 +477,8 @@ const DEFAULT_CONFIG = {
         { name: "London", lat: 51.5074, lon: -0.1278 },
         { name: "New York", lat: 40.7128, lon: -74.0060 },
         { name: "Hong Kong", lat: 22.3193, lon: 114.1694 }
-    ]
+    ],
+    theme_settings: {}
 };
 
 let config = DEFAULT_CONFIG;
@@ -657,6 +669,74 @@ function updateSettingsScope(themePath) {
     const panel = document.getElementById('settingsPanel');
     if (panel) panel.dataset.themeScope = scope;
     document.documentElement.dataset.themeScope = scope;
+
+    const customSettingsSection = document.getElementById('customSettingsSection');
+    if (customSettingsSection) {
+        customSettingsSection.innerHTML = ''; // clear previous
+        
+        let customSettings = null;
+        if (themePath && ThemeManager.manifestCache[themePath]) {
+            customSettings = ThemeManager.manifestCache[themePath].custom_settings;
+        }
+
+        if (customSettings && Array.isArray(customSettings)) {
+            // Theme specific settings exist, ensure we have an object to store them
+            if (!config.theme_settings[themePath]) {
+                config.theme_settings[themePath] = {};
+            }
+
+            customSettingsSection.appendChild(document.createElement('hr'));
+            const header = document.createElement('h4');
+            header.textContent = 'Theme Settings';
+            customSettingsSection.appendChild(header);
+
+            customSettings.forEach(setting => {
+                const group = document.createElement('div');
+                group.className = 'control-group';
+
+                const label = document.createElement('label');
+                label.textContent = setting.label || setting.id;
+                label.htmlFor = `custom_setting_${setting.id}`;
+                group.appendChild(label);
+
+                const input = document.createElement('input');
+                input.id = `custom_setting_${setting.id}`;
+                input.type = setting.type || 'text';
+                
+                if (setting.type === 'range') {
+                    if (setting.min !== undefined) input.min = setting.min;
+                    if (setting.max !== undefined) input.max = setting.max;
+                    if (setting.step !== undefined) input.step = setting.step;
+                }
+
+                // Load saved value or default
+                const savedVal = config.theme_settings[themePath][setting.id];
+                input.value = savedVal !== undefined ? savedVal : (setting.default || '');
+
+                // Ensure default is applied immediately if no save exists
+                if (savedVal === undefined) {
+                    config.theme_settings[themePath][setting.id] = input.value;
+                }
+
+                input.addEventListener('input', (e) => {
+                    const val = setting.type === 'range' ? parseFloat(e.target.value) : e.target.value;
+                    config.theme_settings[themePath][setting.id] = val;
+                    ConfigManager.saveConfig();
+
+                    // Live broadcast
+                    if (ThemeManager.currentIframe?.contentWindow) {
+                        ThemeManager.currentIframe.contentWindow.postMessage({
+                            type: 'novaframe-settings',
+                            settings: { [setting.id]: val }
+                        }, '*');
+                    }
+                });
+
+                group.appendChild(input);
+                customSettingsSection.appendChild(group);
+            });
+        }
+    }
 }
 
 // ── Bind UI Event Listeners ───────────────────────────────────────────────
@@ -801,23 +881,25 @@ async function scanThemes() {
                 // Peek manifest for a friendly label and a render_mode tag
                 let label = entry.name;
                 let mode = 'unknown';
+                let custom_settings = null;
                 try {
                     const { manifest } = await ThemeManager.readManifest(themePath);
                     if (manifest.name) label = `${manifest.name}`;
                     mode = manifest.render_mode || 'internal-legacy';
+                    if (manifest.custom_settings) custom_settings = manifest.custom_settings;
                 } catch (_) {
                     // Skip dirs without a valid manifest — they aren't loadable themes.
                     continue;
                 }
                 
                 // Save to in-memory cache
-                ThemeManager.manifestCache[themePath] = { label, mode };
+                ThemeManager.manifestCache[themePath] = { label, mode, custom_settings };
 
                 const option = document.createElement('option');
                 option.value = themePath;
                 option.dataset.renderMode = mode;
                 // Suffix the mode label so power users can tell at a glance
-                const modeTag = mode === 'external-html' ? ' (html)' : mode === 'external-canvas' ? ' (canvas)' : '';
+                const modeTag = ''; // Removed (html) and (canvas) suffixes for production
                 option.textContent = `${label}${modeTag}`;
                 selector.appendChild(option);
             }
@@ -1019,6 +1101,17 @@ document.addEventListener('DOMContentLoaded', async () => {
             window.__TAURI__.event.listen('occlusion-change', (event) => {
                 const isVisible = event.payload;
                 isWindowOccluded = !isVisible;
+                
+                // Broadcast to external themes so they can pause their render loops
+                if (ThemeManager.currentIframe?.contentWindow) {
+                    try {
+                        ThemeManager.currentIframe.contentWindow.postMessage({
+                            type: 'novaframe-occlusion',
+                            occluded: isWindowOccluded
+                        }, '*');
+                    } catch (_) {}
+                }
+
                 if (isVisible) {
                     lastDrawTime = 0; // force redraw
                     if (!rafId) {
