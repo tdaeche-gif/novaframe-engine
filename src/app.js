@@ -1098,6 +1098,26 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             });
 
+            // macOS Sleep Failsafe (Bulletproof)
+            // When the OS goes to sleep, the WebGL context in the iframe is often lost or frozen.
+            // A delta-time interval detects if the CPU actually slept (e.g. >5 seconds passed between 1s intervals).
+            let lastTick = Date.now();
+            setInterval(() => {
+                const now = Date.now();
+                if (now - lastTick > 5000) {
+                    console.log("Wake from sleep detected. Reloading iframe to restore WebGL context.");
+                    if (ThemeManager.currentIframe) {
+                        // Force a hard reload of the iframe to obliterate the dead WebGL context
+                        const currentSrc = ThemeManager.currentIframe.src;
+                        ThemeManager.currentIframe.src = 'about:blank';
+                        setTimeout(() => {
+                            ThemeManager.currentIframe.src = currentSrc;
+                        }, 50);
+                    }
+                }
+                lastTick = now;
+            }, 1000);
+
             window.__TAURI__.event.listen('occlusion-change', (event) => {
                 const isVisible = event.payload;
                 isWindowOccluded = !isVisible;
