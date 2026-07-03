@@ -674,7 +674,7 @@ async function scanThemes() {
                     console.log(`[Novaframe] Invoking Rust to download and install theme ${wallpaperId}...`);
                     const installedThemeId = await window.__TAURI__.core.invoke('download_and_install_theme', { 
                         url: downloadUrl,
-                        themeId: wallpaperId
+                        theme_id: wallpaperId
                     });
                     
                     console.log(`[Novaframe] Theme ${installedThemeId} installed successfully! Loading it...`);
