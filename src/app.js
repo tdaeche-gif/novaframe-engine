@@ -86,7 +86,7 @@ function initDualWindowSystem() {
 // driven entirely by CSS, no inline styles.  Call this whenever a theme loads,
 // falls back, or is set via UI.
 //
-//   legacy  = Geochron world-map + sun (Internal-Legacy)
+//   legacy  = Novaframe world-map + sun (Internal-Legacy)
 //   dynamic = any external-html / external-canvas theme like Ignis
 function applyThemeScope() {
     const mode = ThemeManager?.currentManifest?.render_mode === 'internal-legacy'
