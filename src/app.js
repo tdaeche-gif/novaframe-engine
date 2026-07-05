@@ -1322,7 +1322,7 @@ function drawLocationPins(mapW, mapH, rafTime) {
         ctx.restore();
         
         // 3. Typography and Label Pill
-        const labelStr = loc.name.toUpperCase();
+        const labelStr = loc.name;
         ctx.font = '600 10px "Inter", -apple-system, sans-serif';
         const metrics = ctx.measureText(labelStr);
         const textW = metrics.width;
@@ -1367,11 +1367,19 @@ function drawLocationPins(mapW, mapH, rafTime) {
         ctx.restore();
         
         // Draw Text
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)'; // Increased transparency by 15%
-        ctx.textAlign = 'left';
+        // Clear the heavy pill shadow so the text doesn't smear
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
+        ctx.shadowBlur = 2;
+        ctx.shadowOffsetY = 1;
+        
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.95)'; // Make text slightly brighter for contrast
+        ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        // Remove the +1 offset to perfectly center the text vertically
-        ctx.fillText(labelStr, pillX + padX, pillY + (pillH / 2));
+        
+        // We use textAlign = 'center' and draw at exactly pillX + (pillW / 2) 
+        // to guarantee perfectly equal padding on the left and right mathematically.
+        // We subtract -1 from Y to pull the text up visually and balance the top/bottom padding
+        ctx.fillText(labelStr, pillX + (pillW / 2), pillY + (pillH / 2) - 1);
     });
 
     ctx.restore();
@@ -1464,6 +1472,12 @@ function renderTimeline(mapW, winW, offsetX, topY) {
         ctx.fillStyle = isQuarter ? '#ffffff' : ThemeManager.currentTheme.timelineTextColor; //
         ctx.fillText(label, xWin, topY + (ThemeManager.currentTheme.timelineHeight - tickH) / 2); //
     }
+
+    // Add a clear indicator label on the left edge of the timeline bar
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.font = '600 10px "Inter", -apple-system, sans-serif';
+    ctx.fillText("WORLD CLOCK (UTC)", 16, topY + (ThemeManager.currentTheme.timelineHeight / 2) + 1);
 }
 
 // ── Projection & Crop ──────────────────────────────────────────────────────
