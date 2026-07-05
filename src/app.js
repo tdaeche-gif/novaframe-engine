@@ -1284,31 +1284,97 @@ function drawTimeZones(mapW, mapH) {
 }
 
 function drawLocationPins(mapW, mapH, rafTime) {
-    ctx.save(); //
+    ctx.save();
     config.pinnedLocations.forEach(loc => {
-        const x = ((loc.lon + 180) / 360) * mapW; //
-        const y = latToMercatorY(loc.lat) * mapH; //
+        const x = ((loc.lon + 180) / 360) * mapW;
+        const y = latToMercatorY(loc.lat) * mapH;
         
-        const pulseRadius = 4 + Math.abs(Math.sin(rafTime / 600)) * 7; //
+        // 1. Radar Pulse Animation
+        const pulsePeriod = 2500; // 2.5 seconds per pulse
+        const pulsePhase = (rafTime % pulsePeriod) / pulsePeriod; // 0.0 to 1.0
+        const pulseRadius = 4 + (pulsePhase * 15);
         
-        ctx.strokeStyle = ThemeManager.currentTheme.pinGlowColor; //
-        ctx.lineWidth = 2; //
-        ctx.beginPath(); //
-        ctx.arc(x, y, pulseRadius, 0, Math.PI * 2); //
-        ctx.stroke(); //
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, 1.0 - Math.pow(pulsePhase, 1.5)); // Fade out smoothly
+        ctx.strokeStyle = ThemeManager.currentTheme.pinGlowColor;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(x, y, pulseRadius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
         
-        ctx.beginPath(); //
-        ctx.arc(x, y, 3, 0, Math.PI * 2); //
-        ctx.fillStyle = ThemeManager.currentTheme.pinColor; //
-        ctx.fill(); //
+        // 2. Main Dot with Shadow
+        ctx.save();
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+        ctx.shadowBlur = 6;
+        ctx.shadowOffsetY = 2;
         
-        ctx.font = '12px "Inter", -apple-system, sans-serif'; //
-        ctx.textAlign = 'center'; //
-        ctx.fillStyle = ThemeManager.currentTheme.pinTextColor; //
-        ctx.fillText(` ${loc.name}`, x + 6, y + 3); //
+        ctx.beginPath();
+        ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = ThemeManager.currentTheme.pinColor;
+        ctx.fill();
+        
+        // Inner bright highlight for a 3D glass bead effect
+        ctx.beginPath();
+        ctx.arc(x - 1, y - 1, 1, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.fill();
+        ctx.restore();
+        
+        // 3. Typography and Label Pill
+        const labelStr = loc.name.toUpperCase();
+        ctx.font = '600 10px "Inter", -apple-system, sans-serif';
+        const metrics = ctx.measureText(labelStr);
+        const textW = metrics.width;
+        
+        const padX = 8;
+        const padY = 4;
+        const pillW = textW + (padX * 2);
+        const pillH = 18;
+        
+        // Position pill to the right and slightly up from the dot
+        const pillX = x + 10;
+        const pillY = y - (pillH / 2);
+        
+        // Draw connector line
+        ctx.beginPath();
+        ctx.moveTo(x + 3.5, y);
+        ctx.lineTo(pillX, y);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        
+        // Draw glass pill
+        ctx.save();
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
+        ctx.shadowBlur = 8;
+        ctx.shadowOffsetY = 3;
+        
+        ctx.fillStyle = 'rgba(15, 20, 25, 0.50)'; // Increased transparency by 15%
+        if (ctx.roundRect) {
+            ctx.beginPath();
+            ctx.roundRect(pillX, pillY, pillW, pillH, pillH / 2);
+            ctx.fill();
+            
+            // Subtle glass rim
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        } else {
+            // Fallback for older browsers
+            ctx.fillRect(pillX, pillY, pillW, pillH);
+        }
+        ctx.restore();
+        
+        // Draw Text
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)'; // Increased transparency by 15%
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        // Remove the +1 offset to perfectly center the text vertically
+        ctx.fillText(labelStr, pillX + padX, pillY + (pillH / 2));
     });
 
-    ctx.restore(); //
+    ctx.restore();
 }
 
 // ── Initialization ─────────────────────────────────────────────────────────
