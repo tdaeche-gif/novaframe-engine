@@ -34,3 +34,4 @@ themes/*/
 .env
 .env.*
 !.env.example
+*.dmg

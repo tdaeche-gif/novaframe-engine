@@ -12,8 +12,6 @@
 <body>
     <div id="safe-area-detector"></div>
     <div id="container" style="position: relative; width: 100%; height: 100%;">
-        <canvas id="novaframeCanvas" style="position: absolute; top: 0; left: 0;"></canvas>
-        <canvas id="overlayCanvas" style="position: absolute; top: 0; left: 0; z-index: 10;"></canvas>
     </div>
 
     <div id="settingsPanel">
@@ -27,43 +25,24 @@
             <!-- COMMON-SCOPE: visible for all themes -->
             <div class="control-group">
                 <label for="themeSelector">Active Theme</label>
-                <select id="themeSelector">
-                    <option value="">Internal-Legacy</option>
-                </select>
+                <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center;">
+                    <select id="themeSelector" style="flex: 1; height: 36px; box-sizing: border-box; margin-bottom: 0;">
+                        <option value="" disabled>Select a Theme...</option>
+                    </select>
+                    <button id="refreshThemeBtn" style="width: 36px; height: 36px; box-sizing: border-box; flex-shrink: 0; padding: 0; border-radius: 6px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #fff; cursor: pointer; transition: all 0.2s ease;" title="Reload Wallpaper">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                        </svg>
+                    </button>
+                </div>
                 <button id="openStoreBtn" class="btn-primary">
                     Browse Marketplace
                 </button>
             </div>
 
-            <!-- LEGACY-SCOPE: only visible when active theme's manifest declares internal-legacy -->
-            <section id="legacySection" data-scope="legacy">
-                <div class="control-group">
-                    <label for="opacitySlider">Shadow Opacity</label>
-                    <input type="range" id="opacitySlider" min="0" max="90" value="55">
-                </div>
-
-                <div class="control-group control-row">
-                    <label for="analemmaToggle">Show Solar Analemma</label>
-                    <input type="checkbox" id="analemmaToggle" checked>
-                </div>
-
-                <hr />
-                <h4>Tracked Pins</h4>
-                <div id="pinsList"></div>
-
-                <div class="add-pin-form">
-                    <input type="text" id="pinName" placeholder="Name (e.g. London)" list="citiesList">
-                    <datalist id="citiesList"></datalist>
-                    <div class="row">
-                        <input type="number" id="pinLat" step="0.0001" placeholder="Lat (51.5)">
-                        <input type="number" id="pinLon" step="0.0001" placeholder="Lon (-0.1)">
-                    </div>
-                    <button id="addPinBtn">Add Custom Pin</button>
-                </div>
-            </section>
-            
             <!-- Dynamic Custom Settings (injected based on manifest) -->
-            <section id="customSettingsSection" data-scope="dynamic">
+            <section id="customSettingsSection">
                 <!-- Dynamically populated by app.js -->
             </section>
 
@@ -78,8 +57,8 @@
         </div>
         <div class="panel-handle">
             <svg class="cog-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
                 <circle cx="12" cy="12" r="3"></circle>
-                <path d="M19.4 15a1.65 1.65 0 0 0 0.33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82V9a1.65 1.65 0 0 0 1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
             </svg>
         </div>
     </div>

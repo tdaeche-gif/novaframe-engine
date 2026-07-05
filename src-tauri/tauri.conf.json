@@ -57,7 +57,8 @@
         "scope": [
           "$APPDATA/**",
           "$APPLOCALDATA/**",
-          "$APPDATA/themes/**"
+          "$APPDATA/themes/**",
+          "/Users/tdaeche/Novaframe-Wallpapers/**"
         ]
       }
     }

@@ -13,6 +13,31 @@ async function getThemesDir() {
     }
 }
 
+// Build a theme:// URL from an absolute filesystem path. Unlike Tauri's
+// convertFileSrc (which percent-encodes the WHOLE path into one URL segment,
+// breaking every relative subresource inside the theme), this keeps real
+// directory segments so `./img.jpg` and `fetch('./shaders/x.frag')` resolve.
+function toThemeUrl(fsPath) {
+    const encoded = fsPath.split('/').map(encodeURIComponent).join('/');
+    const lead = encoded.startsWith('/') ? '' : '/';
+    // Windows/Android webviews expose custom schemes as http://<scheme>.localhost
+    const isWindows = navigator.userAgent.includes('Windows');
+    return isWindows
+        ? `http://theme.localhost${lead}${encoded}`
+        : `theme://localhost${lead}${encoded}`;
+}
+
+// Keep the docked settings panel expanded while a native <select> has its OS
+// popup open. The popup renders outside the panel window's own frame (often
+// above it, since the panel is docked to the screen edge) — without this, the
+// Rust hover-poll loop sees the cursor leave the window bounds mid-selection
+// and collapses the panel, yanking it out from under the open dropdown.
+function setPanelLocked(locked) {
+    if (window.__TAURI__?.core?.invoke) {
+        window.__TAURI__.core.invoke('set_settings_panel_locked', { locked }).catch(() => {});
+    }
+}
+
 // Check and provision default theme inside system AppData on startup
 async function verifyAndProvisionAppData() {
     const tauriFs = window.__TAURI_PLUGIN_FS__ || (window.__TAURI__ && window.__TAURI__.fs);
@@ -96,12 +121,7 @@ function applyThemeScope() {
     document.documentElement.dataset.themeScope = mode;
 }
 
-// ── Canvas & context setup ─────────────────────────────────────────────────
-const baseCanvas = document.getElementById('novaframeCanvas');
-const baseCtx = baseCanvas.getContext('2d', { alpha: false });
 
-const canvas = document.getElementById('overlayCanvas');
-const ctx = canvas.getContext('2d', { alpha: true });
 
 // ── Theme Manager ──────────────────────────────────────────────────────────
 // Loads one of three render modes per theme:
@@ -142,11 +162,8 @@ const ThemeManager = {
 
     // Read the theme's manifest from disk. Throws on read failure.
     async readManifest(themePath) {
-        if (!window.__TAURI__?.core?.convertFileSrc) {
-            throw new Error("Tauri convertFileSrc unavailable");
-        }
         for (const candidate of ['engine_manifest.json', 'manifest.json']) {
-            const uri = window.__TAURI__.core.convertFileSrc(`${themePath}/${candidate}`);
+            const uri = toThemeUrl(`${themePath}/${candidate}`);
             const res = await fetch(uri);
             if (res.ok) {
                 const m = await res.json();
@@ -156,11 +173,14 @@ const ThemeManager = {
         throw new Error(`Manifest not found under ${themePath}`);
     },
 
-    async loadTheme(themePath) {
+    async loadTheme(themePath, forceReload = false) {
         if (!themePath) {
-            // No-op if we're already showing legacy.
+            // No-op if we're already showing a theme
             if (this.currentThemePath === null && !this.currentManifest) return;
-            this.fallbackToLegacy();
+            // Unmount if empty theme passed
+            this.unmountIframe();
+            this.currentThemePath = null;
+            this.currentManifest = null;
             return;
         }
 
@@ -168,8 +188,7 @@ const ThemeManager = {
         try {
             parsed = await this.readManifest(themePath);
         } catch (err) {
-            console.error("[Novaframe] Failed to read theme manifest, falling back:", err);
-            this.fallbackToLegacy();
+            console.error("[Novaframe] Failed to read theme manifest:", err);
             return;
         }
 
@@ -182,71 +201,31 @@ const ThemeManager = {
             return;
         }
 
-        const renderMode = manifest.render_mode || 'internal-legacy';
+        const renderMode = manifest.render_mode || 'external-html';
 
         this.currentManifest = manifest;
         this.currentThemePath = themePath;
 
-        if (renderMode === 'internal-legacy') {
-            await this.loadInternalLegacy(themePath, manifest);
-        } else if (renderMode === 'external-html' || renderMode === 'external-canvas') {
+        if (renderMode === 'external-html' || renderMode === 'external-canvas') {
             await this.loadExternalHtml(themePath, manifest, renderMode);
         } else {
-            console.error(`[Novaframe] Unknown render_mode "${renderMode}", falling back`);
-            this.fallbackToLegacy();
-            return;
+            console.error(`[Novaframe] Unknown render_mode "${renderMode}", falling back to external-html`);
+            await this.loadExternalHtml(themePath, manifest, 'external-html');
         }
 
         applyThemeScope();
         await ConfigManager.setTheme(themePath);
     },
 
-    async loadInternalLegacy(themePath, manifest) {
-        // Tear down any iframe from previous external mode
-        this.unmountIframe();
-
-        // Only honor legacy `assets.background_image` + `render_engine` shape.
-        // New wallpapers that declare `render_mode: "external-html"` skip this path.
-        const bgImage = manifest.assets?.background_image;
-        if (bgImage) {
-            const imageUri = window.__TAURI__.core.convertFileSrc(`${themePath}/${bgImage}`);
-            const imgResponse = await fetch(imageUri, { method: 'HEAD' });
-            if (!imgResponse.ok) throw new Error("Map image missing at " + imageUri);
-            this.currentTheme = { ...LEGACY_THEME_DEFAULTS, ...(manifest.settings || {}) };
-            this.currentTheme.mapImageSrc = imageUri;
-        } else {
-            // No custom asset — just apply settings overrides, keep default map.
-            this.currentTheme = { ...LEGACY_THEME_DEFAULTS, ...(manifest.settings || {}) };
-        }
-
-        // Optional external shader sources
-        if (manifest.render_engine?.vertex_shader && manifest.render_engine?.fragment_shader) {
-            const vertUri = window.__TAURI__.core.convertFileSrc(`${themePath}/${manifest.render_engine.vertex_shader}`);
-            const fragUri = window.__TAURI__.core.convertFileSrc(`${themePath}/${manifest.render_engine.fragment_shader}`);
-            const [vertRes, fragRes] = await Promise.all([fetch(vertUri), fetch(fragUri)]);
-            if (!vertRes.ok) throw new Error("Vertex shader missing");
-            if (!fragRes.ok) throw new Error("Fragment shader missing");
-            glShaderSources.vert = await vertRes.text();
-            glShaderSources.frag = await fragRes.text();
-            glInitialized = false;
-        } else {
-            glShaderSources.vert = null;
-            glShaderSources.frag = null;
-        }
-
-        this.applyThemeToDOM();
-        showCanvases();
-    },
 
     async loadExternalHtml(themePath, manifest) {
         const entry = manifest.entry || 'index.html';
-        const fileSrc = window.__TAURI__.core.convertFileSrc(`${themePath}/${entry}`);
+        const fileSrc = toThemeUrl(`${themePath}/${entry}`);
         const transparent = manifest.transparent !== false; // default true
-        this.mountIframe(fileSrc, transparent);
-        hideCanvases();
+        this.mountIframe(fileSrc, transparent, themePath);
     },
 
-    mountIframe(src, transparent) {
+    mountIframe(src, transparent, themePath) {
         this.unmountIframe();
         const container = document.getElementById('container');
         if (!container) return;
@@ -291,9 +270,17 @@ const ThemeManager = {
             // after the next paint to be safe.
             requestAnimationFrame(() => postViewport('novaframe-theme-ready'));
 
-            // Dispatch saved theme settings if they exist
-            if (config.theme_settings && config.theme_settings[absoluteThemePath]) {
-                const settings = config.theme_settings[absoluteThemePath];
+            // Dispatch settings: manifest defaults overlaid with any saved values.
+            // Guarantees a freshly installed theme starts from its manifest
+            // defaults and a returning theme gets the user's saved state.
+            const defaults = {};
+            (ThemeManager.currentManifest?.custom_settings || []).forEach(s => {
+                if (s.default !== undefined) defaults[s.id] = s.default;
+            });
+            const saved = (config.theme_settings && config.theme_settings[themePath]) || {};
+            const settings = { ...defaults, ...saved };
+            if (Object.keys(settings).length > 0) {
+                _lastRelayedSettings = JSON.stringify(settings);
                 try {
                     iframe.contentWindow.postMessage({
                         type: 'novaframe-settings',
@@ -324,43 +311,31 @@ const ThemeManager = {
             }
         }
         this.currentIframe = null;
-    },
-
-    fallbackToLegacy() {
-        this.unmountIframe();
-        this.currentManifest = null;
-        this.currentTheme = { ...LEGACY_THEME_DEFAULTS };
-        this.applyThemeToDOM();
-        showCanvases();
-        this.currentThemePath = null;
-        applyThemeScope();
-        // Persist the absence of an active theme so scanThemes auto-select can fire.
-        ConfigManager.setTheme(null);
-    },
-
-    applyThemeToDOM() {
-        // Only relevant for internal-legacy mode; external-html mode hides canvases.
-        if (this.currentTheme.mapImageSrc) {
-            mapImage.src = this.currentTheme.mapImageSrc;
-        }
-        document.documentElement.style.backgroundColor = this.currentTheme.bgColor;
-        document.body.style.backgroundColor = this.currentTheme.bgColor;
+        _lastRelayedSettings = null;
     }
 };
 
-// ── Canvas visibility helpers ──────────────────────────────────────────────
-function hideCanvases() {
-    const c1 = document.getElementById('novaframeCanvas');
-    const c2 = document.getElementById('overlayCanvas');
-    if (c1) c1.style.display = 'none';
-    if (c2) c2.style.display = 'none';
+// ── Live settings relay (main window) ──────────────────────────────────────
+// Forward the active theme's saved settings to the wallpaper iframe. Called
+// whenever config changes (event from the settings window, or store poll).
+// Sends the FULL settings object — themes treat every message as a partial
+// patch, so resending unchanged keys is harmless and keeps this generic.
+let _lastRelayedSettings = null;
+function relayThemeSettingsToIframe() {
+    const tp = ThemeManager.currentThemePath;
+    const cw = ThemeManager.currentIframe?.contentWindow;
+    if (!tp || !cw) return;
+    const settings = config.theme_settings?.[tp];
+    if (!settings) return;
+    const serialized = JSON.stringify(settings);
+    if (serialized === _lastRelayedSettings) return; // dedupe
+    _lastRelayedSettings = serialized;
+    try {
+        cw.postMessage({ type: 'novaframe-settings', settings }, '*');
+    } catch (_) {}
 }
-function showCanvases() {
-    const c1 = document.getElementById('novaframeCanvas');
-    const c2 = document.getElementById('overlayCanvas');
-    if (c1) c1.style.display = '';
-    if (c2) c2.style.display = '';
-}
+
+
 
 // ── Mouse passthrough to iframe (for interactive themes like Ignis) ────────
 window.addEventListener('mousemove', (e) => {
@@ -377,97 +352,7 @@ window.addEventListener('mousemove', (e) => {
     } catch (_) {}
 });
 
-const mapImage = new Image();
-const cityLightsImage = new Image();
-cityLightsImage.onload = () => {
-    console.log("[Novaframe] City lights asset loaded.");
-    if (glInitialized && !cityLightsUploaded) {
-        startLoop();
-    }
-};
-cityLightsImage.src = 'assets/world-city-lights.png';
-
-let isMapLoaded = false;
-let rafStarted = false;
-let rafId = null;
-let activeUntil = 0;
-let isWindowOccluded = false;
-let timeoutId = null;
-
-function startLoop() {
-    if (rafStarted) return;
-    rafStarted = true;
-
-    const isInteractive = Date.now() < activeUntil;
-    if (isInteractive) {
-        rafId = requestAnimationFrame(render);
-    } else {
-        timeoutId = setTimeout(() => {
-            rafStarted = false;
-            render(performance.now());
-        }, 10000); // 10-second idle draw interval
-    }
-}
-
-mapImage.onload = () => {
-    isMapLoaded = true;
-    console.log(`[Novaframe] Map asset loaded: ${mapImage.naturalWidth}x${mapImage.naturalHeight}`);
-    resizeCanvas();
-    startLoop();
-};
-
-mapImage.onerror = (err) => {
-    console.error(`[Novaframe] ASSET LOAD FAILURE — missing mapImage asset`);
-    if (!mapImage.src.includes('assets/world-map-mercator.jpg')) {
-        ThemeManager.fallbackToLegacy();
-    } else {
-        // Even if the legacy map is missing (e.g. moved to themes folder), start the loop!
-        isMapLoaded = false;
-        resizeCanvas();
-        startLoop();
-    }
-};
-
-window.addEventListener('resize', () => {
-    resizeCanvas();
-    lastCacheWidth = -1;
-    lastCacheHeight = -1;
-});
-
-function resizeCanvas() {
-    const dpr = window.devicePixelRatio || 1; 
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-    
-    // Set backing store to full physical pixels for Retina clarity
-    baseCanvas.width = width * dpr;
-    baseCanvas.height = height * dpr;
-    baseCanvas.style.transform = `scale(${1 / dpr})`;
-    baseCanvas.style.transformOrigin = 'top left';
-    baseCanvas.style.width = (width * dpr) + 'px';
-    baseCanvas.style.height = (height * dpr) + 'px';
-    baseCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    canvas.style.transform = `scale(${1 / dpr})`;
-    canvas.style.transformOrigin = 'top left';
-    canvas.style.width = (width * dpr) + 'px';
-    canvas.style.height = (height * dpr) + 'px';
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    
-    drawStaticMap(width, height);
-    
-    if (window.__TAURI__ && window.__TAURI__.core) {
-        window.__TAURI__.core.invoke('log_from_js', { 
-            message: `resizeCanvas: logical=${width}x${height}, dpr=${dpr}, canvas=${canvas.width}x${canvas.height}` 
-        }).catch(err => console.error(err));
-    }
-}
-
 // ── Constants & Configuration ──────────────────────────────────────────────
-const CACHE_LIFETIME = 60000;          // Recompute terminator every 60 s
-const DRAW_INTERVAL = 1000;            // Base fallback frame throttle (1 FPS)
 
 // ── State Persistence Configurations (ConfigManager) ───────────────────────
 const DEFAULT_CONFIG = {
@@ -533,7 +418,10 @@ const ConfigManager = {
             if (isMainWindow) {
                 setInterval(async () => {
                     const latestConfig = await this.store.get('novaframe_config');
-                    if (latestConfig) config = latestConfig;
+                    if (latestConfig) {
+                        config = latestConfig;
+                        relayThemeSettingsToIframe();
+                    }
 
                     const latestTheme = await this.store.get('activeTheme');
                     const normLatest = latestTheme || null;
@@ -681,6 +569,9 @@ function updateSettingsScope(themePath) {
 
         if (customSettings && Array.isArray(customSettings)) {
             // Theme specific settings exist, ensure we have an object to store them
+            if (!config.theme_settings) {
+                config.theme_settings = {};
+            }
             if (!config.theme_settings[themePath]) {
                 config.theme_settings[themePath] = {};
             }
@@ -703,38 +594,146 @@ function updateSettingsScope(themePath) {
                 input.id = `custom_setting_${setting.id}`;
                 input.type = setting.type || 'text';
                 
-                if (setting.type === 'range') {
-                    if (setting.min !== undefined) input.min = setting.min;
-                    if (setting.max !== undefined) input.max = setting.max;
-                    if (setting.step !== undefined) input.step = setting.step;
-                }
+                if (setting.type === 'checkbox') {
+                    group.classList.add('control-row');
+                    const savedVal = config.theme_settings[themePath][setting.id];
+                    input.checked = savedVal !== undefined ? savedVal : (setting.default ?? false);
 
-                // Load saved value or default
-                const savedVal = config.theme_settings[themePath][setting.id];
-                input.value = savedVal !== undefined ? savedVal : (setting.default || '');
-
-                // Ensure default is applied immediately if no save exists
-                if (savedVal === undefined) {
-                    config.theme_settings[themePath][setting.id] = input.value;
-                }
-
-                input.addEventListener('input', (e) => {
-                    const val = setting.type === 'range' ? parseFloat(e.target.value) : e.target.value;
-                    config.theme_settings[themePath][setting.id] = val;
-                    ConfigManager.saveConfig();
-
-                    // Live broadcast
-                    if (ThemeManager.currentIframe?.contentWindow) {
-                        ThemeManager.currentIframe.contentWindow.postMessage({
-                            type: 'novaframe-settings',
-                            settings: { [setting.id]: val }
-                        }, '*');
+                    if (savedVal === undefined) {
+                        config.theme_settings[themePath][setting.id] = input.checked;
                     }
-                });
+
+                    input.addEventListener('change', (e) => {
+                        const val = e.target.checked;
+                        config.theme_settings[themePath][setting.id] = val;
+                        ConfigManager.saveConfig();
+
+                        if (ThemeManager.currentIframe?.contentWindow) {
+                            ThemeManager.currentIframe.contentWindow.postMessage({
+                                type: 'novaframe-settings',
+                                settings: { [setting.id]: val }
+                            }, '*');
+                        }
+                    });
+                } else {
+                    if (setting.type === 'range') {
+                        if (setting.min !== undefined) input.min = setting.min;
+                        if (setting.max !== undefined) input.max = setting.max;
+                        if (setting.step !== undefined) input.step = setting.step;
+                    }
+
+                    // Load saved value or default
+                    const savedVal = config.theme_settings[themePath][setting.id];
+                    input.value = savedVal !== undefined ? savedVal : (setting.default ?? '');
+
+                    // Ensure default is applied immediately if no save exists
+                    if (savedVal === undefined) {
+                        config.theme_settings[themePath][setting.id] = input.value;
+                    }
+
+                    input.addEventListener('input', (e) => {
+                        const val = setting.type === 'range' ? parseFloat(e.target.value) : e.target.value;
+                        config.theme_settings[themePath][setting.id] = val;
+                        ConfigManager.saveConfig();
+
+                        // Live broadcast
+                        if (ThemeManager.currentIframe?.contentWindow) {
+                            ThemeManager.currentIframe.contentWindow.postMessage({
+                                type: 'novaframe-settings',
+                                settings: { [setting.id]: val }
+                            }, '*');
+                        }
+                    });
+                }
 
                 group.appendChild(input);
                 customSettingsSection.appendChild(group);
             });
+
+            // Hardcoded legacy pins logic for Classic Mercator
+            if (ThemeManager.manifestCache[themePath].label === 'Classic Mercator') {
+                // Inputs stack vertically (City on its own row, Lat/Lon paired,
+                // full-width Add button) using the .add-pin-form styles so nothing
+                // ever overflows the panel width horizontally.
+                const legacyHTML = `
+                    <div class="control-group" style="margin-top: 16px;">
+                        <label>Pinned Locations</label>
+                        <div id="pinsList" class="settings-list" style="max-height: 150px; overflow-y: auto; margin-bottom: 8px;"></div>
+                        <div class="add-pin-form">
+                            <input type="text" id="newPinName" placeholder="City">
+                            <div class="row">
+                                <input type="text" id="newPinLat" placeholder="Lat">
+                                <input type="text" id="newPinLon" placeholder="Lon">
+                            </div>
+                            <button id="addPinBtn">Add Location</button>
+                        </div>
+                    </div>
+                `;
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = legacyHTML;
+                customSettingsSection.appendChild(tempDiv.firstElementChild);
+                
+                const pinsList = document.getElementById('pinsList');
+                const addPinBtn = document.getElementById('addPinBtn');
+                
+                const getPins = () => config.theme_settings[themePath].pinned_locations || [];
+                const savePins = (pins) => {
+                    config.theme_settings[themePath].pinned_locations = pins;
+                    ConfigManager.saveConfig();
+                    if (ThemeManager.currentIframe?.contentWindow) {
+                        ThemeManager.currentIframe.contentWindow.postMessage({ type: 'novaframe-settings', settings: { pinned_locations: pins } }, '*');
+                    }
+                };
+
+                const renderPins = () => {
+                    pinsList.innerHTML = '';
+                    getPins().forEach((pin, index) => {
+                        const item = document.createElement('div');
+                        item.className = 'pin-item';
+                        item.innerHTML = `
+                            <div class="pin-info">
+                                <div class="pin-name">${pin.name}</div>
+                                <div class="pin-coords">${pin.lat}, ${pin.lon}</div>
+                            </div>
+                            <button class="delete-btn" data-index="${index}" title="Remove">×</button>
+                        `;
+                        pinsList.appendChild(item);
+                    });
+                    pinsList.querySelectorAll('.delete-btn').forEach(btn => {
+                        btn.addEventListener('click', (e) => {
+                            const idx = parseInt(e.target.dataset.index);
+                            const pins = getPins();
+                            pins.splice(idx, 1);
+                            savePins(pins);
+                            renderPins();
+                        });
+                    });
+                };
+                
+                addPinBtn.addEventListener('click', () => {
+                    const name = document.getElementById('newPinName').value;
+                    const lat = parseFloat(document.getElementById('newPinLat').value);
+                    const lon = parseFloat(document.getElementById('newPinLon').value);
+                    if (name && !isNaN(lat) && !isNaN(lon)) {
+                        const pins = getPins();
+                        pins.push({ name, lat, lon });
+                        savePins(pins);
+                        renderPins();
+                        document.getElementById('newPinName').value = '';
+                        document.getElementById('newPinLat').value = '';
+                        document.getElementById('newPinLon').value = '';
+                    }
+                });
+                
+                if (!config.theme_settings[themePath].pinned_locations) {
+                    config.theme_settings[themePath].pinned_locations = [
+                        { name: "London", lat: 51.5074, lon: -0.1278 },
+                        { name: "New York", lat: 40.7128, lon: -74.0060 },
+                        { name: "Tokyo", lat: 35.6762, lon: 139.6503 }
+                    ];
+                }
+                renderPins();
+            }
         }
     }
 }
@@ -747,113 +746,14 @@ async function initSettingsUI() {
     // 2. Fetch active theme from store
     const activeTheme = await ConfigManager.getTheme();
     console.log("[Novaframe] Active theme from config:", activeTheme);
-    if (activeTheme && document.getElementById('themeSelector')) {
-        const selector = document.getElementById('themeSelector');
+    const selector = document.getElementById('themeSelector');
+    if (activeTheme && selector) {
         selector.value = activeTheme;
     }
     
     // 3. Synchronously apply UI layout scoping
     updateSettingsScope(activeTheme);
 
-    const opacitySlider = document.getElementById('opacitySlider'); //
-    const pinsList = document.getElementById('pinsList'); //
-    const addPinBtn = document.getElementById('addPinBtn'); //
-
-    // Set initial structural UI values
-    opacitySlider.value = config.shadowOpacity; //
-    
-    // Shadow slider listener
-    opacitySlider.addEventListener('input', (e) => {
-        config.shadowOpacity = parseInt(e.target.value);
-        ConfigManager.saveConfig();
-    });
-    
-    // Analemma toggle listener
-    const analemmaToggle = document.getElementById('analemmaToggle');
-    if (analemmaToggle) {
-        analemmaToggle.checked = config.showAnalemma !== false;
-        analemmaToggle.addEventListener('change', (e) => {
-            config.showAnalemma = e.target.checked;
-            ConfigManager.saveConfig();
-        });
-    }
-    
-    // Add location function
-    addPinBtn.addEventListener('click', () => {
-        const name = document.getElementById('pinName').value.trim(); //
-        const lat = parseFloat(document.getElementById('pinLat').value); //
-        const lon = parseFloat(document.getElementById('pinLon').value); //
-        
-        if (name && !isNaN(lat) && !isNaN(lon)) {
-            config.pinnedLocations.push({ name, lat, lon });
-            ConfigManager.saveConfig();
-            renderUIList(); //
-            // Clear input fields
-            document.getElementById('pinName').value = ''; //
-            document.getElementById('pinLat').value = ''; //
-            document.getElementById('pinLon').value = ''; //
-        }
-    });
-
-    // Populate cities autocomplete list
-    const citiesList = document.getElementById('citiesList');
-    if (citiesList) {
-        citiesList.innerHTML = '';
-        citiesDb.forEach(c => {
-            const opt = document.createElement('option');
-            opt.value = c.name;
-            citiesList.appendChild(opt);
-        });
-    }
-
-    // Auto-autocomplete on input and immediate add
-    const pinNameInput = document.getElementById('pinName');
-    if (pinNameInput) {
-        pinNameInput.addEventListener('input', (e) => {
-            const val = e.target.value.trim();
-            const matched = citiesDb.find(c => c.name.toLowerCase() === val.toLowerCase());
-            if (matched) {
-                // Check if already pinned
-                const exists = config.pinnedLocations.some(loc => loc.name.toLowerCase() === matched.name.toLowerCase());
-                if (!exists) {
-                    config.pinnedLocations.push({ name: matched.name, lat: matched.lat, lon: matched.lon });
-                    ConfigManager.saveConfig();
-                    renderUIList();
-                }
-                // Clear fields
-                pinNameInput.value = '';
-                document.getElementById('pinLat').value = '';
-                document.getElementById('pinLon').value = '';
-            }
-        });
-    }
-    
-    function renderUIList() {
-        pinsList.innerHTML = '';
-        config.pinnedLocations.forEach((loc, index) => {
-            const item = document.createElement('div');
-            item.className = 'pin-item';
-            item.innerHTML = `
-                <div class="pin-info">
-                    <span class="pin-name">${loc.name}</span>
-                    <span class="pin-coords">${loc.lat.toFixed(1)}°, ${loc.lon.toFixed(1)}°</span>
-                </div>
-                <button class="delete-btn" data-index="${index}">&times;</button>
-            `;
-            pinsList.appendChild(item);
-        });
-    }
-    
-    pinsList.addEventListener('click', (e) => {
-        if (e.target.classList.contains('delete-btn')) {
-            const index = parseInt(e.target.getAttribute('data-index'));
-            config.pinnedLocations.splice(index, 1);
-            ConfigManager.saveConfig();
-            renderUIList();
-        }
-    });
-    
-    renderUIList();
 }
 
 // ── Dynamic Theme Scanner (Module 1) ───────────────────────────────────────
@@ -861,7 +761,7 @@ async function scanThemes() {
     const selector = document.getElementById('themeSelector');
     if (!selector) return;
     
-    selector.innerHTML = '<option value="">Internal-Legacy</option>';
+    selector.innerHTML = '<option value="" disabled>Select a Theme...</option>';
     
     const tauriFs = window.__TAURI_PLUGIN_FS__ || (window.__TAURI__ && window.__TAURI__.fs);
     if (!tauriFs) return;
@@ -873,57 +773,59 @@ async function scanThemes() {
         console.log("[Novaframe] Found entries:", entries);
         
         for (const entry of entries) {
-            // Fix #2: Tauri v2 plugin-fs uses entry.isDirectory (boolean).
-            // Tauri v1 used entry.children (array). Support both shapes.
             const isDir = entry.isDirectory === true || Array.isArray(entry.children);
             if (isDir && entry.name) {
                 const themePath = `${themesDir}/${entry.name}`;
-                // Peek manifest for a friendly label and a render_mode tag
                 let label = entry.name;
                 let mode = 'unknown';
                 let custom_settings = null;
                 try {
                     const { manifest } = await ThemeManager.readManifest(themePath);
                     if (manifest.name) label = `${manifest.name}`;
-                    mode = manifest.render_mode || 'internal-legacy';
+                    mode = manifest.render_mode || 'external-html';
                     if (manifest.custom_settings) custom_settings = manifest.custom_settings;
                 } catch (_) {
-                    // Skip dirs without a valid manifest — they aren't loadable themes.
                     continue;
                 }
                 
-                // Save to in-memory cache
                 ThemeManager.manifestCache[themePath] = { label, mode, custom_settings };
 
                 const option = document.createElement('option');
                 option.value = themePath;
                 option.dataset.renderMode = mode;
-                // Suffix the mode label so power users can tell at a glance
-                const modeTag = ''; // Removed (html) and (canvas) suffixes for production
-                option.textContent = `${label}${modeTag}`;
+                option.textContent = `${label}`;
                 selector.appendChild(option);
             }
         }
 
         const activeTheme = await ConfigManager.getTheme();
         console.log("[Novaframe] Active theme from config:", activeTheme);
-        if (activeTheme) {
-            selector.value = activeTheme;
-            if (selector.value !== activeTheme) {
-                console.warn("[Novaframe] Active theme not in dropdown — was it installed correctly?", activeTheme);
-            }
-        } else {
-            // No active theme persisted yet — if exactly one theme is on disk,
-            // auto-select it. This handles the first-time reload after a fresh
-            // install where the store hadn't been flushed before reload.
+        
+        let targetTheme = activeTheme;
+        
+        // If activeTheme is missing or points to the old Internal-Legacy ("")
+        if (!activeTheme || activeTheme === "") {
             const options = selector.querySelectorAll('option');
             const themeOptions = Array.from(options).filter(o => o.value !== '');
-            if (themeOptions.length === 1) {
-                console.log("[Novaframe] Auto-selecting the only available theme:", themeOptions[0].value);
-                selector.value = themeOptions[0].value;
-                await ConfigManager.setTheme(themeOptions[0].value);
-                ThemeManager.loadTheme(themeOptions[0].value);
+            if (themeOptions.length > 0) {
+                targetTheme = themeOptions[0].value;
+                console.log("[Novaframe] Auto-selecting first available theme:", targetTheme);
             }
+        }
+        
+        if (targetTheme) {
+            selector.value = targetTheme;
+            if (selector.value !== targetTheme) {
+                console.warn("[Novaframe] Active theme not in dropdown — was it installed correctly?", targetTheme);
+                // Fallback to first theme if active theme is invalid
+                const themeOptions = Array.from(selector.querySelectorAll('option')).filter(o => o.value !== '');
+                if (themeOptions.length > 0) {
+                    selector.value = themeOptions[0].value;
+                    targetTheme = themeOptions[0].value;
+                }
+            }
+            await ConfigManager.setTheme(targetTheme);
+            ThemeManager.loadTheme(targetTheme);
         }
         
     } catch (e) {
@@ -939,6 +841,25 @@ async function scanThemes() {
                 console.error("Tauri invoke API not available.");
             }
         });
+    }
+
+    // Maps the backend's stable error codes ({ error, code }) to messages a
+    // user can act on. Codes are defined in marketplace-backend/src/utils/apiError.ts.
+    function friendlyApiError(data) {
+        switch (data?.code) {
+            case 'UNAUTHORIZED':
+                return "Your session could not be verified. Please open the marketplace and sign in again.";
+            case 'TOKEN_EXPIRED':
+                return "This install link has expired. Please click Apply on the wallpaper again in the marketplace.";
+            case 'NOT_PURCHASED':
+                return "This wallpaper hasn't been purchased on your account. If you just bought it, wait a few seconds and try again.";
+            case 'NOT_FOUND':
+                return "This wallpaper is no longer available in the marketplace.";
+            case 'SERVER_ERROR':
+                return "The marketplace server hit a problem. Please try again in a minute.";
+            default:
+                return "License verification failed: " + (data?.error || "unknown error");
+        }
     }
 
     if (window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen) {
@@ -998,7 +919,7 @@ async function scanThemes() {
                 } else {
                     console.error(TAG, stamp, 'verify-token returned !ok || !success:', data);
                     console.error("Token verification failed:", data.error);
-                    alert("License Verification Failed: " + data.error);
+                    alert(friendlyApiError(data));
                 }
             } catch (err) {
                 console.error(TAG, stamp, '❌ exception in listener:', err);
@@ -1010,7 +931,16 @@ async function scanThemes() {
         console.error('[Main] window.__TAURI__.event.listen is NOT available. The event cannot be received.');
     }
 
+    // Lock the panel open while the native dropdown popup is open (mousedown
+    // covers pointer-opened popups, focus covers keyboard-opened ones). Unlock
+    // on change (an option was picked) or blur (closed without picking, e.g.
+    // Escape or clicking away) — whichever fires first closes the popup.
+    selector.addEventListener('mousedown', () => setPanelLocked(true));
+    selector.addEventListener('focus', () => setPanelLocked(true));
+    selector.addEventListener('blur', () => setPanelLocked(false));
+
     selector.addEventListener('change', async (e) => {
+        setPanelLocked(false);
         const selected = e.target.value;
         // Persist + broadcast. The broadcast fans out to all windows; the
         // settings-window listener will update its own dropdown highlight +
@@ -1095,6 +1025,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             window.__TAURI__.event.listen('config-changed', (event) => {
                 if (event.payload) {
                     config = event.payload;
+                    relayThemeSettingsToIframe();
                 }
             });
 
@@ -1120,671 +1051,25 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             window.__TAURI__.event.listen('occlusion-change', (event) => {
                 const isVisible = event.payload;
-                isWindowOccluded = !isVisible;
-                
                 // Broadcast to external themes so they can pause their render loops
                 if (ThemeManager.currentIframe?.contentWindow) {
                     try {
                         ThemeManager.currentIframe.contentWindow.postMessage({
                             type: 'novaframe-occlusion',
-                            occluded: isWindowOccluded
+                            occluded: !isVisible
                         }, '*');
                     } catch (_) {}
                 }
-
-                if (isVisible) {
-                    lastDrawTime = 0; // force redraw
-                    if (!rafId) {
-                        if (timeoutId) {
-                            clearTimeout(timeoutId);
-                            timeoutId = null;
-                        }
-                        rafStarted = false;
-                        startLoop();
-                    }
-                }
             });
 
-            window.__TAURI__.event.listen('settings-active', (event) => {
-                const isActive = event.payload;
-                if (isActive) {
-                    activeUntil = Date.now() + 15000;
-                    if (!rafId) {
-                        if (timeoutId) {
-                            clearTimeout(timeoutId);
-                            timeoutId = null;
-                        }
-                        rafStarted = false;
-                        startLoop();
-                    }
-                } else {
-                    activeUntil = 0;
-                }
-            });
+
         }
     } else {
         await ConfigManager.init();
         initSettingsUI();
     }
 });
-// ── State ──────────────────────────────────────────────────────────────────
-let terminatorCache = null; //
-let lastCacheTime = 0; //
-let lastCacheWidth = -1; //
-let lastCacheHeight = -1; //
-let lastDrawTime = 0; //
 
-// ── Astronomical helpers ───────────────────────────────────────────────────
-
-function getDayOfYear(date) {
-    const start = new Date(Date.UTC(date.getUTCFullYear(), 0, 1)); //
-    return Math.floor((date - start) / 86400000) + 1; //
-}
-
-function getSubsolarPoint(date) {
-    const n = getDayOfYear(date); //
-    const declination = -23.44 * Math.cos((2 * Math.PI / 365.24) * (n + 10)); //
-    const B = (2 * Math.PI / 365.24) * (n - 81); //
-    const eot = 9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B); //
-    const utcH = date.getUTCHours() + date.getUTCMinutes() / 60 + date.getUTCSeconds() / 3600; //
-
-    let longitude = 180 - utcH * 15 + eot / 4; //
-    if (longitude < -180) longitude += 360; //
-    if (longitude > 180) longitude -= 360; //
-
-    return { declination, longitude, eot }; //
-}
-
-// ── Mercator projection ────────────────────────────────────────────────────
-
-function latToMercatorY(lat) {
-    const MAX_LAT = 82.007; // Cutoff for the background map
-    lat = Math.max(-MAX_LAT, Math.min(MAX_LAT, lat));
-    const latRad = lat * (Math.PI / 180);
-    const y = Math.log(Math.tan(Math.PI / 4 + latRad / 2));
-    const maxY = Math.log(Math.tan(Math.PI / 4 + (MAX_LAT * Math.PI / 180) / 2));
-    return 0.5 - (y / (2 * maxY));
-}
-
-// ── Terminator polygon ─────────────────────────────────────────────────────
-
-function computeTerminatorPolygon(w, h) {
-    const subsolar = getSubsolarPoint(new Date()); //
-    const decRad = subsolar.declination * (Math.PI / 180); //
-    const subLonRad = subsolar.longitude * (Math.PI / 180); //
-    const pts = []; //
-
-    for (let x = 0; x <= w; x += 2) { //
-        const lon = (x / w) * 360 - 180; //
-        const lonRad = lon * (Math.PI / 180); //
-
-        let latRad; //
-        if (Math.abs(subsolar.declination) < 0.001) { //
-            latRad = Math.cos(lonRad - subLonRad) >= 0 ? Math.PI / 2 : -Math.PI / 2; //
-        } else {
-            latRad = Math.atan2(-Math.cos(lonRad - subLonRad), Math.tan(decRad)); //
-        }
-
-        const lat = latRad * (180 / Math.PI); //
-        const y = latToMercatorY(lat) * h; //
-        pts.push({ x, y }); //
-    }
-
-    const nightPoleY = subsolar.declination > 0 ? h : 0; //
-    pts.push({ x: w, y: nightPoleY }); //
-    pts.push({ x: 0, y: nightPoleY }); //
-
-    return pts; //
-}
-
-// ── Feature Overlay Modules ────────────────────────────────────────────────
-
-function drawStaticMap(winW, winH) {
-    if (!isMapLoaded) {
-        baseCtx.fillStyle = '#1a2540';
-        baseCtx.fillRect(0, 0, winW, winH);
-        baseCtx.fillStyle = '#ffffff';
-        baseCtx.font = '18px sans-serif';
-        baseCtx.fillText('Loading map asset…', 24, 24);
-        return;
-    }
-    
-    baseCtx.fillStyle = ThemeManager.currentTheme.bgColor;
-    baseCtx.fillRect(0, 0, winW, winH);
-
-    baseCtx.save();
-    applyMapProjection(baseCtx, winW, winH);
-    baseCtx.drawImage(mapImage, 0, 0, winW, winH);
-    drawTimeZones(winW, winH);
-    baseCtx.restore();
-}
-
-function drawTimeZones(mapW, mapH) {
-    baseCtx.save();
-    baseCtx.strokeStyle = ThemeManager.currentTheme.gridColor;
-    baseCtx.setLineDash([4, 8]);
-    baseCtx.lineWidth = 1;
-    
-    for (let h = -11; h <= 12; h++) {
-        const lon = h * 15;
-        const x = ((lon + 180) / 360) * mapW;
-        baseCtx.beginPath();
-        baseCtx.moveTo(x, 0);
-        baseCtx.lineTo(x, mapH);
-        baseCtx.stroke();
-    }
-    
-    // Draw Equator Line
-    baseCtx.beginPath();
-    baseCtx.moveTo(0, mapH / 2);
-    baseCtx.lineTo(mapW, mapH / 2);
-    baseCtx.strokeStyle = ThemeManager.currentTheme.equatorColor;
-    baseCtx.stroke();
-    baseCtx.restore();
-}
-
-function drawLocationPins(mapW, mapH, rafTime) {
-    ctx.save();
-    config.pinnedLocations.forEach(loc => {
-        const x = ((loc.lon + 180) / 360) * mapW;
-        const y = latToMercatorY(loc.lat) * mapH;
-        
-        // 1. Radar Pulse Animation
-        const pulsePeriod = 2500; // 2.5 seconds per pulse
-        const pulsePhase = (rafTime % pulsePeriod) / pulsePeriod; // 0.0 to 1.0
-        const pulseRadius = 4 + (pulsePhase * 15);
-        
-        ctx.save();
-        ctx.globalAlpha = Math.max(0, 1.0 - Math.pow(pulsePhase, 1.5)); // Fade out smoothly
-        ctx.strokeStyle = ThemeManager.currentTheme.pinGlowColor;
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(x, y, pulseRadius, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
-        
-        // 2. Main Dot with Shadow
-        ctx.save();
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
-        ctx.shadowBlur = 6;
-        ctx.shadowOffsetY = 2;
-        
-        ctx.beginPath();
-        ctx.arc(x, y, 3.5, 0, Math.PI * 2);
-        ctx.fillStyle = ThemeManager.currentTheme.pinColor;
-        ctx.fill();
-        
-        // Inner bright highlight for a 3D glass bead effect
-        ctx.beginPath();
-        ctx.arc(x - 1, y - 1, 1, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-        ctx.fill();
-        ctx.restore();
-        
-        // 3. Typography and Label Pill
-        const labelStr = loc.name;
-        ctx.font = '600 10px "Inter", -apple-system, sans-serif';
-        const metrics = ctx.measureText(labelStr);
-        const textW = metrics.width;
-        
-        const padX = 8;
-        const padY = 4;
-        const pillW = textW + (padX * 2);
-        const pillH = 18;
-        
-        // Position pill to the right and slightly up from the dot
-        const pillX = x + 10;
-        const pillY = y - (pillH / 2);
-        
-        // Draw connector line
-        ctx.beginPath();
-        ctx.moveTo(x + 3.5, y);
-        ctx.lineTo(pillX, y);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        
-        // Draw glass pill
-        ctx.save();
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
-        ctx.shadowBlur = 8;
-        ctx.shadowOffsetY = 3;
-        
-        ctx.fillStyle = 'rgba(15, 20, 25, 0.50)'; // Increased transparency by 15%
-        if (ctx.roundRect) {
-            ctx.beginPath();
-            ctx.roundRect(pillX, pillY, pillW, pillH, pillH / 2);
-            ctx.fill();
-            
-            // Subtle glass rim
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
-            ctx.lineWidth = 1;
-            ctx.stroke();
-        } else {
-            // Fallback for older browsers
-            ctx.fillRect(pillX, pillY, pillW, pillH);
-        }
-        ctx.restore();
-        
-        // Draw Text
-        // Clear the heavy pill shadow so the text doesn't smear
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
-        ctx.shadowBlur = 2;
-        ctx.shadowOffsetY = 1;
-        
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.95)'; // Make text slightly brighter for contrast
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        
-        // We use textAlign = 'center' and draw at exactly pillX + (pillW / 2) 
-        // to guarantee perfectly equal padding on the left and right mathematically.
-        // We subtract -1 from Y to pull the text up visually and balance the top/bottom padding
-        ctx.fillText(labelStr, pillX + (pillW / 2), pillY + (pillH / 2) - 1);
-    });
-
-    ctx.restore();
-}
-
-// ── Initialization ─────────────────────────────────────────────────────────
-// Initialization is now properly awaited in DOMContentLoaded via ConfigManager.init()
-
-function drawSolarAnalemma(mapW, mapH, currentSubsolar) {
-    if (config.showAnalemma === false) return; // Feature toggle
-
-    ctx.save(); //
-    ctx.strokeStyle = ThemeManager.currentTheme.equatorColor; //
-    ctx.setLineDash([2, 4]); //
-    ctx.lineWidth = 1.5; //
-    ctx.beginPath(); //
-
-    const dummyDate = new Date(); //
-    const currentDay = getDayOfYear(dummyDate); //
-    let currentDayX = 0; //
-    let currentDayY = 0; //
-
-    for (let d = 1; d <= 365; d++) { //
-        dummyDate.setUTCMonth(0); //
-        dummyDate.setUTCDate(d); //
-        
-        const declination = -23.44 * Math.cos((2 * Math.PI / 365.24) * (d + 10)); //
-        const B = (2 * Math.PI / 365.24) * (d - 81); //
-        const eot = 9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B); //
-        const eotDeg = eot / 4; //
-        
-        const lon = currentSubsolar.longitude + eotDeg; //
-        const x = ((lon + 180) / 360) * mapW; //
-        const y = latToMercatorY(declination) * mapH; //
-
-        if (d === 1) ctx.moveTo(x, y); //
-        else ctx.lineTo(x, y); //
-
-        if (d === currentDay) { //
-            currentDayX = x; //
-            currentDayY = y; //
-        }
-    }
-    ctx.closePath(); //
-    ctx.stroke(); //
-
-    ctx.restore(); //
-    ctx.save(); //
-    ctx.fillStyle = ThemeManager.currentTheme.sunMarkerColor; //
-    ctx.shadowColor = ThemeManager.currentTheme.sunGlowColor; //
-    ctx.shadowBlur = 8; //
-    ctx.beginPath(); //
-    ctx.arc(currentDayX, currentDayY, 4, 0, Math.PI * 2); //
-    ctx.fill(); //
-    ctx.restore(); //
-}
-
-
-
-function renderTimeline(mapW, winW, offsetX, topY) {
-    const now = new Date(); //
-    const utcH = now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600; //
-
-    ctx.fillStyle = ThemeManager.currentTheme.timelineBgColor; //
-    ctx.fillRect(0, topY, winW, ThemeManager.currentTheme.timelineHeight); //
-    
-    ctx.fillStyle = ThemeManager.currentTheme.timelineTextColor; //
-    ctx.strokeStyle = ThemeManager.currentTheme.timelineTickColor; //
-    ctx.lineWidth = 1; //
-    ctx.font = '11px "SF Mono", "Fira Mono", monospace'; //
-    ctx.textAlign = 'center'; //
-    ctx.textBaseline = 'middle'; //
-
-    for (let h = 0; h < 24; h++) { //
-        const lon = (h - utcH) * 15; //
-        let xScreen = (lon + 180) / 360 * winW; //
-        xScreen = ((xScreen % winW) + winW) % winW; //
-        const xWin = xScreen - offsetX; //
-
-        if (xWin < -60 || xWin > winW + 60) continue; //
-
-        const isQuarter = h % 6 === 0; //
-        const tickH = isQuarter ? 10 : 5; //
-        ctx.beginPath(); //
-        ctx.moveTo(xWin, topY + ThemeManager.currentTheme.timelineHeight - tickH); //
-        ctx.lineTo(xWin, topY + ThemeManager.currentTheme.timelineHeight); //
-        ctx.stroke(); //
-
-        const label = String(h).padStart(2, '0') + ':00'; //
-        ctx.fillStyle = isQuarter ? '#ffffff' : ThemeManager.currentTheme.timelineTextColor; //
-        ctx.fillText(label, xWin, topY + (ThemeManager.currentTheme.timelineHeight - tickH) / 2); //
-    }
-
-    // Add a clear indicator label on the left edge of the timeline bar
-    ctx.textAlign = 'left';
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-    ctx.font = '600 10px "Inter", -apple-system, sans-serif';
-    ctx.fillText("WORLD CLOCK (UTC)", 16, topY + (ThemeManager.currentTheme.timelineHeight / 2) + 1);
-}
-
-// ── Projection & Crop ──────────────────────────────────────────────────────
-
-function applyMapProjection(ctx, winW, winH) {
-    if (!isMapLoaded) return;
-    
-    const mapAspect = mapImage.naturalWidth / mapImage.naturalHeight;
-    const screenAspect = winW / winH;
-    
-    let drawW, drawH;
-    if (screenAspect > mapAspect) {
-        // Screen is wider than the map: scale to fit width
-        drawW = winW;
-        drawH = winW / mapAspect;
-    } else {
-        // Screen is taller than the map: scale to fit height
-        drawH = winH;
-        drawW = drawH * mapAspect;
-    }
-    
-    // Center horizontally
-    const offsetX = (winW - drawW) / 2;
-    
-    // Calculate how much the map overflows the screen vertically
-    const overflowY = Math.max(0, drawH - winH);
-    
-    const offsetY = -overflowY / 2;
-    
-    // Clip the rendering to the screen bounds
-    ctx.beginPath();
-    ctx.rect(0, 0, winW, winH);
-    ctx.clip();
-    
-    // Transform context so the 0..winW, 0..winH rendering code automatically 
-    // stretches correctly across the newly scaled and shifted projection.
-    ctx.translate(offsetX, offsetY);
-    ctx.scale(drawW / winW, drawH / winH);
-}
-
-// ── WebGL GPU Terminator (Module 4) ────────────────────────────────────────
-
-let glCanvas = null;
-let glContext = null;
-let glProgram = null;
-let glLocs = {};
-let glInitialized = false;
-let glFailed = false;
-let glBuffer = null;
-let cityLightsTexture = null;
-let cityLightsUploaded = false;
-let glShaderSources = { vert: null, frag: null }; // Populated by ThemeManager.loadTheme()
-
-function compileShader(gl, type, source) {
-    const shader = gl.createShader(type);
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        console.error("[WebGL] Shader compile error:", gl.getShaderInfoLog(shader));
-        gl.deleteShader(shader);
-        return null;
-    }
-    return shader;
-}
-
-function initWebGLShader(winW, winH) {
-    if (glFailed) return false;
-    if (glInitialized) {
-        if (glCanvas.width !== winW || glCanvas.height !== winH) {
-            glCanvas.width = winW;
-            glCanvas.height = winH;
-            glContext.viewport(0, 0, winW, winH);
-        }
-        return true;
-    }
-    
-    try {
-        glCanvas = document.createElement('canvas');
-        glCanvas.width = winW;
-        glCanvas.height = winH;
-        glContext = glCanvas.getContext('webgl', { alpha: true, premultipliedAlpha: false });
-        if (!glContext) throw new Error("WebGL context not available");
-        
-        // Use externally-loaded shader source (from active theme) or fall back to inline defaults
-        const vsSource = glShaderSources.vert ?? `
-            attribute vec2 aVertexPosition;
-            varying vec2 vUv;
-            void main() {
-                vUv = aVertexPosition * 0.5 + 0.5;
-                vUv.y = 1.0 - vUv.y;
-                gl_Position = vec4(aVertexPosition, 0.0, 1.0);
-            }
-        `;
-        
-        const fsSource = glShaderSources.frag ?? `
-            precision mediump float;
-            varying vec2 vUv;
-            uniform vec2 uSubsolar; // x = lon, y = lat
-            uniform vec4 uColor;
-            uniform sampler2D uCityLights;
-            
-            #define PI 3.14159265359
-            
-            void main() {
-                float lon = (vUv.x - 0.5) * 360.0;
-                float y_merc = (0.5 - vUv.y) * 2.0 * 2.66068;
-                float latRad = 2.0 * atan(exp(y_merc)) - PI / 2.0;
-                float lonRad = lon * PI / 180.0;
-                float subLatRad = uSubsolar.y * PI / 180.0;
-                float subLonRad = uSubsolar.x * PI / 180.0;
-                
-                float cosAngle = sin(latRad)*sin(subLatRad) + cos(latRad)*cos(subLatRad)*cos(lonRad - subLonRad);
-                
-                // Twilight zone transition (cosAngle from 0.0 to -0.20)
-                float alpha = smoothstep(0.0, -0.20, cosAngle);
-                
-                // Sample city lights mask (greyscale)
-                float lightsMask = texture2D(uCityLights, vUv).r;
-                
-                vec3 shadowColor = uColor.rgb;
-                float shadowAlpha = uColor.a * alpha;
-                
-                // Warm golden glow for lights, only visible on the night side (alpha)
-                vec3 lightsColor = vec3(1.0, 0.88, 0.52);
-                float lightsAlpha = lightsMask * alpha * 0.95;
-                
-                vec3 finalRgb = mix(shadowColor, lightsColor, lightsAlpha);
-                float finalAlpha = max(shadowAlpha, lightsAlpha);
-                
-                gl_FragColor = vec4(finalRgb, finalAlpha);
-            }
-        `;
-        
-        const vs = compileShader(glContext, glContext.VERTEX_SHADER, vsSource);
-        const fs = compileShader(glContext, glContext.FRAGMENT_SHADER, fsSource);
-        
-        if (!vs || !fs) throw new Error("Shader compilation failed");
-        
-        glProgram = glContext.createProgram();
-        glContext.attachShader(glProgram, vs);
-        glContext.attachShader(glProgram, fs);
-        glContext.linkProgram(glProgram);
-        
-        if (!glContext.getProgramParameter(glProgram, glContext.LINK_STATUS)) {
-            throw new Error("Program link failed");
-        }
-        
-        glLocs = {
-            position: glContext.getAttribLocation(glProgram, 'aVertexPosition'),
-            subsolar: glContext.getUniformLocation(glProgram, 'uSubsolar'),
-            color: glContext.getUniformLocation(glProgram, 'uColor'),
-            cityLights: glContext.getUniformLocation(glProgram, 'uCityLights')
-        };
-        
-        glBuffer = glContext.createBuffer();
-        glContext.bindBuffer(glContext.ARRAY_BUFFER, glBuffer);
-        const positions = new Float32Array([
-            -1.0, -1.0,   1.0, -1.0,   -1.0,  1.0,
-            -1.0,  1.0,   1.0, -1.0,    1.0,  1.0
-        ]);
-        glContext.bufferData(glContext.ARRAY_BUFFER, positions, glContext.STATIC_DRAW);
-        
-        cityLightsTexture = glContext.createTexture();
-        glContext.bindTexture(glContext.TEXTURE_2D, cityLightsTexture);
-        glContext.texImage2D(glContext.TEXTURE_2D, 0, glContext.RGBA, 1, 1, 0, glContext.RGBA, glContext.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
-        glContext.texParameteri(glContext.TEXTURE_2D, glContext.TEXTURE_MIN_FILTER, glContext.LINEAR);
-        glContext.texParameteri(glContext.TEXTURE_2D, glContext.TEXTURE_MAG_FILTER, glContext.LINEAR);
-        glContext.texParameteri(glContext.TEXTURE_2D, glContext.TEXTURE_WRAP_S, glContext.CLAMP_TO_EDGE);
-        glContext.texParameteri(glContext.TEXTURE_2D, glContext.TEXTURE_WRAP_T, glContext.CLAMP_TO_EDGE);
-        cityLightsUploaded = false;
-        
-        glInitialized = true;
-        return true;
-    } catch (e) {
-        console.warn("[WebGL] Shader initialization failed, falling back to CPU", e);
-        glFailed = true;
-        return false;
-    }
-}
-
-function renderWebGLTerminator(ctx2d, winW, winH, subsolarPoint, r, g, b, a) {
-    if (cityLightsImage.complete && !cityLightsUploaded && glContext) {
-        glContext.bindTexture(glContext.TEXTURE_2D, cityLightsTexture);
-        glContext.pixelStorei(glContext.UNPACK_FLIP_Y_WEBGL, false);
-        glContext.texImage2D(glContext.TEXTURE_2D, 0, glContext.RGBA, glContext.RGBA, glContext.UNSIGNED_BYTE, cityLightsImage);
-        cityLightsUploaded = true;
-        console.log("[WebGL] City lights texture uploaded successfully.");
-    }
-
-    glContext.viewport(0, 0, winW, winH);
-    glContext.clearColor(0, 0, 0, 0);
-    glContext.clear(glContext.COLOR_BUFFER_BIT);
-    
-    glContext.useProgram(glProgram);
-    
-    glContext.bindBuffer(glContext.ARRAY_BUFFER, glBuffer);
-    glContext.vertexAttribPointer(glLocs.position, 2, glContext.FLOAT, false, 0, 0);
-    glContext.enableVertexAttribArray(glLocs.position);
-    
-    glContext.uniform2f(glLocs.subsolar, subsolarPoint.longitude, subsolarPoint.declination);
-    glContext.uniform4f(glLocs.color, r / 255, g / 255, b / 255, a);
-    
-    glContext.activeTexture(glContext.TEXTURE0);
-    glContext.bindTexture(glContext.TEXTURE_2D, cityLightsTexture);
-    glContext.uniform1i(glLocs.cityLights, 0);
-    
-    glContext.drawArrays(glContext.TRIANGLES, 0, 6);
-    
-    ctx2d.drawImage(glCanvas, 0, 0, winW, winH);
-}
-
-// ── Main render loop ───────────────────────────────────────────────────────
-
-function drawFrame(rafTime) {
-    const winW = window.innerWidth;
-    const winH = window.innerHeight;
-
-    // 1. Clear dynamic overlay
-    ctx.clearRect(0, 0, winW, winH);
-
-    // Apply viewport projection to prevent stretching and crop Antarctica
-    ctx.save();
-    applyMapProjection(ctx, winW, winH);
-
-    // 2. Draw night-shadow terminator polygon
-    const subsolar = getSubsolarPoint(new Date());
-    const colors = ThemeManager.currentTheme.shadowColorHex.split(',').map(n => parseInt(n.trim()));
-    const useGpu = ThemeManager.currentTheme.use_gpu_shader;
-    const shadowOpacity = config.shadowOpacity / 100;
-    
-    if (useGpu && initWebGLShader(winW, winH)) {
-        renderWebGLTerminator(ctx, winW, winH, subsolar, colors[0]||0, colors[1]||0, colors[2]||0, shadowOpacity);
-    } else {
-        // Fallback: CPU polygon rendering
-        const sizeChanged = winW !== lastCacheWidth || winH !== lastCacheHeight;
-        if (!terminatorCache || rafTime - lastCacheTime > CACHE_LIFETIME || sizeChanged) {
-            terminatorCache = computeTerminatorPolygon(winW, winH);
-            lastCacheTime = rafTime;
-            lastCacheWidth = winW;
-            lastCacheHeight = winH;
-        }
-
-        ctx.fillStyle = `rgba(${ThemeManager.currentTheme.shadowColorHex}, ${shadowOpacity})`;
-
-        ctx.beginPath();
-        ctx.moveTo(terminatorCache[0].x, terminatorCache[0].y);
-        for (let i = 1; i < terminatorCache.length; i++) {
-            ctx.lineTo(terminatorCache[i].x, terminatorCache[i].y);
-        }
-        ctx.closePath();
-        ctx.fill();
-    }
-
-    // 5. Draw advanced astronomical and positional layers over the map space
-    drawSolarAnalemma(winW, winH, subsolar);
-    drawLocationPins(winW, winH, rafTime);
-
-    // Restore coordinate system to standard for UI overlays
-    ctx.restore();
-
-    // 6. Draw linear layout timeline strip
-    const MAC_OS_MENU_BAR_OFFSET = 40;
-    const timelineY = MAC_OS_MENU_BAR_OFFSET;
-    renderTimeline(winW, winW, 0, timelineY);
-}
-
-function render(rafTime) {
-    if (document.hidden || isWindowOccluded) {
-        rafId = null;
-        if (timeoutId) {
-            clearTimeout(timeoutId);
-            timeoutId = null;
-        }
-        rafStarted = false;
-        return;
-    }
-
-    drawFrame(rafTime);
-    lastDrawTime = rafTime;
-
-    rafId = null;
-    if (timeoutId) {
-        clearTimeout(timeoutId);
-        timeoutId = null;
-    }
-    rafStarted = false;
-
-    startLoop();
-}
-
-// ── Visibility API Handler ────────────────────────────────────────────────
-document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-        if (rafId) {
-            cancelAnimationFrame(rafId);
-            rafId = null;
-        }
-        if (timeoutId) {
-            clearTimeout(timeoutId);
-            timeoutId = null;
-        }
-        rafStarted = false;
-    } else {
-        lastDrawTime = 0;
-        startLoop();
-    }
-});
 
 // Auto-Updater Integration
 const updateBtn = document.getElementById('updateBtn');

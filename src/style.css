@@ -119,12 +119,20 @@ canvas {
     border-right: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 12px 0 0 12px;
     overflow-y: auto;
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
     gap: 0;
     pointer-events: auto;
     opacity: 1;
     transition: opacity 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* Strict horizontal boundary: no child may exceed the panel width, and any
+   residual overflow is clipped rather than producing a horizontal scrollbar. */
+.panel-content * {
+    max-width: 100%;
+    box-sizing: border-box;
 }
 
 @media (max-width: 100px) {
@@ -141,7 +149,7 @@ canvas {
 }
 
 .panel-content > * + * {
-    margin-top: 12px;
+    margin-top: 16px;
 }
 
 /* Headers, hr, helpers (unchanged from original) */
@@ -177,7 +185,7 @@ canvas {
     display: block;
     font-size: 12px;
     font-weight: 500;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
     color: #8da2fb;
     letter-spacing: 0.02em;
 }
@@ -187,6 +195,16 @@ canvas {
     justify-content: space-between;
 }
 .control-row label { margin-bottom: 0; }
+
+/* Manifest-driven custom settings are appended as sibling .control-group divs
+   with no margin between them (they only inherit spacing from the top-level
+   `.panel-content > * + *` rule, which doesn't reach into this nested section).
+   Without this, sliders/toggles/color-pickers stack flush against each other —
+   this is what caused controls to visually crowd/overlap on themes with many
+   custom_settings. Margin collapses cleanly with the preceding h4/hr/group. */
+#customSettingsSection .control-group {
+    margin-top: 16px;
+}
 
 /* Theme Scope Hiding */
 #settingsPanel[data-theme-scope="dynamic"] #legacySection { display: none; }
@@ -399,6 +417,39 @@ input[type="checkbox"]#analemmaToggle:checked::before {
 .add-pin-form .row {
     display: flex;
     gap: 6px;
+}
+/* Lat/Lon share the row evenly and are allowed to shrink below content width
+   so the pair never forces horizontal overflow. */
+.add-pin-form .row input {
+    flex: 1 1 0;
+    min-width: 0;
+    width: auto;
+}
+
+/* Manifest-driven custom settings (sliders, colour pickers, text) must fill the
+   column and never spill past the panel edge. */
+#customSettingsSection { width: 100%; min-width: 0; }
+#customSettingsSection input[type="range"],
+#customSettingsSection input[type="text"],
+#customSettingsSection input[type="number"],
+#customSettingsSection select {
+    width: 100%;
+    box-sizing: border-box;
+}
+#customSettingsSection input[type="color"] {
+    width: 100%;
+    height: 34px;
+    padding: 2px;
+    background: rgba(7, 10, 15, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+/* Scroll region for the pin list itself. */
+.settings-list {
+    width: 100%;
+    box-sizing: border-box;
 }
 #addPinBtn {
     width: 100%;
