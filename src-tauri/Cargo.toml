@@ -28,6 +28,8 @@ tauri-plugin-deep-link = "2.4.9"
 urlencoding = "2.1.3"
 reqwest = { version = "0.13.4", features = ["stream"] }
 zip = "8.6.0"
+# Stable per-machine identifier for DRM device locking
+machine-uid = "0.5"
 futures-util = "0.3.32"
 tokio = { version = "1.52.3", features = ["full"] }
 

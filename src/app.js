@@ -853,6 +853,8 @@ async function scanThemes() {
                 return "This install link has expired. Please click Apply on the wallpaper again in the marketplace.";
             case 'NOT_PURCHASED':
                 return "This wallpaper hasn't been purchased on your account. If you just bought it, wait a few seconds and try again.";
+            case 'DEVICE_LIMIT':
+                return "You've reached the 2-device limit for this wallpaper. Open My Vault in the marketplace to reset your devices, then try again.";
             case 'NOT_FOUND':
                 return "This wallpaper is no longer available in the marketplace.";
             case 'SERVER_ERROR':
@@ -871,11 +873,21 @@ async function scanThemes() {
             console.log("[Novaframe] Received apply theme request from deep link with token:", token);
 
             try {
+                // Hardware fingerprint for device-locked purchases. If the Rust
+                // command fails we still verify — the backend treats a missing
+                // hardwareId as a legacy client and skips enforcement.
+                let hardwareId = null;
+                try {
+                    hardwareId = await window.__TAURI__.core.invoke('get_hardware_id');
+                } catch (hwErr) {
+                    console.error(TAG, stamp, 'get_hardware_id failed:', hwErr);
+                }
+
                 console.log(TAG, stamp, 'POST /api/engine/verify-token ...');
                 const response = await fetch('https://api.novaframe.co.uk/api/engine/verify-token', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token })
+                    body: JSON.stringify({ token, hardwareId })
                 });
                 console.log(TAG, stamp, 'verify-token responded with HTTP', response.status);
 

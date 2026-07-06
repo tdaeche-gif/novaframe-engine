@@ -21,6 +21,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static SETTINGS_PANEL_LOCKED: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
+fn get_hardware_id() -> Result<String, String> {
+    machine_uid::get().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn set_settings_panel_locked(locked: bool) {
     SETTINGS_PANEL_LOCKED.store(locked, Ordering::Relaxed);
 }
@@ -561,7 +566,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, open_storefront_window, download_and_install_theme, get_themes_dir])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, open_storefront_window, download_and_install_theme, get_themes_dir, get_hardware_id])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }
