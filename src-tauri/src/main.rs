@@ -425,6 +425,16 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
 
 fn main() {
     tauri::Builder::default()
+        // Must be the first plugin registered. Without it, clicking a
+        // novaframe:// deep link on Windows launches a second full engine
+        // instance (two wallpaper windows, doubled CPU, orphan settings
+        // panel) instead of delivering the URL to the running one. The
+        // "deep-link" feature forwards the URL to on_open_url automatically.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("settings") {
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_desktop_underlay::init())
@@ -437,7 +447,17 @@ fn main() {
         })
         .setup(|app| {
             let handle = app.handle().clone();
-            
+
+            // On Windows/Linux the novaframe:// scheme lives in the registry /
+            // desktop files. The NSIS installer registers it, but re-assert at
+            // runtime so portable/dev builds and moved installs still work.
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            {
+                if let Err(e) = handle.deep_link().register_all() {
+                    println!("[Novaframe] deep-link register_all failed: {}", e);
+                }
+            }
+
             // Handle incoming deep links (novaframe://apply?url=...)
             let dl_handle = handle.clone();
             handle.deep_link().on_open_url(move |event| {
@@ -478,8 +498,17 @@ fn main() {
             });
 
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_ignore_cursor_events(true);
-                let _ = window.set_desktop_underlay(true);
+                // Underlay first: on Windows this reparents the window into the
+                // desktop (WorkerW) layer, which can reset extended window
+                // styles — so apply click-through *after* it, and log failures
+                // instead of swallowing them (a failed underlay leaves a
+                // full-screen window sitting over the desktop eating clicks).
+                if let Err(e) = window.set_desktop_underlay(true) {
+                    println!("[Novaframe] set_desktop_underlay failed: {}", e);
+                }
+                if let Err(e) = window.set_ignore_cursor_events(true) {
+                    println!("[Novaframe] set_ignore_cursor_events failed: {}", e);
+                }
 
                 #[cfg(target_os = "windows")]
                 {
@@ -558,6 +587,52 @@ fn main() {
                                             collapse_settings_panel(settings_clone.clone());
                                         }
                                     }
+                                }
+                            }
+                        }
+                    });
+                }
+
+                // Windows/Linux equivalent of the macOS NSEvent hover loop
+                // above — without it the settings cog can never expand on
+                // these platforms. Uses Tauri's cross-platform global cursor
+                // position against the window's physical outer rect.
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let settings_clone = settings_window.clone();
+                    std::thread::spawn(move || {
+                        let mut was_hovered = false;
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+
+                            if SETTINGS_PANEL_LOCKED.load(Ordering::Relaxed) {
+                                if !was_hovered {
+                                    was_hovered = true;
+                                    expand_settings_panel(settings_clone.clone());
+                                }
+                                continue;
+                            }
+
+                            let (cursor, pos, size) = match (
+                                settings_clone.cursor_position(),
+                                settings_clone.outer_position(),
+                                settings_clone.outer_size(),
+                            ) {
+                                (Ok(c), Ok(p), Ok(s)) => (c, p, s),
+                                _ => continue,
+                            };
+
+                            let is_hovered = cursor.x >= pos.x as f64
+                                && cursor.x <= (pos.x + size.width as i32) as f64
+                                && cursor.y >= pos.y as f64
+                                && cursor.y <= (pos.y + size.height as i32) as f64;
+
+                            if is_hovered != was_hovered {
+                                was_hovered = is_hovered;
+                                if is_hovered {
+                                    expand_settings_panel(settings_clone.clone());
+                                } else {
+                                    collapse_settings_panel(settings_clone.clone());
                                 }
                             }
                         }

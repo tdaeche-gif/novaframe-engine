@@ -31,6 +31,10 @@ zip = "8.6.0"
 machine-uid = "0.5"
 # Relaunch support for the auto-updater ("Restart to update")
 tauri-plugin-process = "2"
+# On Windows/Linux a deep link launches a brand-new process; this plugin
+# forwards the URL to the already-running instance instead (the deep-link
+# feature does the forwarding automatically).
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 futures-util = "0.3.32"
 tokio = { version = "1.52.3", features = ["full"] }
 
