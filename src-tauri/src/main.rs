@@ -483,7 +483,7 @@ fn main() {
 
                 #[cfg(target_os = "windows")]
                 {
-                    let _ = window.set_background_color(Some(tauri::Color(0, 0, 0, 0)));
+                    let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
                 }
 
                 #[cfg(target_os = "macos")]
