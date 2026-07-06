@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Novaframe",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.novaframe.desktop.wallpaper",
   "build": {
     "frontendDist": "../src"
@@ -65,13 +65,15 @@
   },
   "plugins": {
     "deep-link": {
-      "schemes": ["novaframe"]
+      "schemes": [
+        "novaframe"
+      ]
     },
     "updater": {
       "endpoints": [
-        "https://marketplace-backend-gamma.vercel.app/api/engine/updates/{{target}}/{{current_version}}"
+        "https://api.novaframe.co.uk/api/engine/updates/{{target}}/{{current_version}}"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY5Mzg2QzgzQzJCMzI4NEEKUldSS0tMUENnMnc0YWRNSmh3MG9aZFpUZ1c4clRnNk5xYjh2QjltSTZNWXZqTDlkSVBwS0x4VVYK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFENDYwQkFCOEU0OUJDNkYKUldSdnZFbU9xd3RHSFdickRaNlJKU2U0WUg0UVpGay9VR3pSbWxHMlRFRko2akJkK2pSMncveEoK"
     }
   },
   "bundle": {
@@ -83,6 +85,7 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
   }
 }

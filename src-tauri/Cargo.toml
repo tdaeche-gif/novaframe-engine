@@ -30,6 +30,8 @@ reqwest = { version = "0.13.4", features = ["stream"] }
 zip = "8.6.0"
 # Stable per-machine identifier for DRM device locking
 machine-uid = "0.5"
+# Relaunch support for the auto-updater ("Restart to update")
+tauri-plugin-process = "2"
 futures-util = "0.3.32"
 tokio = { version = "1.52.3", features = ["full"] }
 

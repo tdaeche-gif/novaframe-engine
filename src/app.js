@@ -1086,6 +1086,87 @@ document.addEventListener('DOMContentLoaded', async () => {
 // Auto-Updater Integration
 const updateBtn = document.getElementById('updateBtn');
 const updateStatus = document.getElementById('updateStatus');
+const updateRestartBanner = document.getElementById('updateRestartBanner');
+const updateRestartBtn = document.getElementById('updateRestartBtn');
+
+async function relaunchApp() {
+    const proc = window.__TAURI_PLUGIN_PROCESS__ || (window.__TAURI__ && window.__TAURI__.process);
+    if (proc && proc.relaunch) {
+        await proc.relaunch();
+    } else {
+        console.error('[Updater] process.relaunch not available');
+    }
+}
+
+// Shared check/download/install. silent=true: no status text unless an update
+// is actually found and installed, in which case the restart banner appears
+// instead of force-relaunching (decisions 2-3 in the distribution plan).
+// silent=false (manual button): verbose progress + auto-relaunch as before.
+let updateInstalledPendingRestart = false;
+
+async function checkAndInstallUpdate({ silent }) {
+    const setStatus = (text, color) => {
+        if (silent || !updateStatus) return;
+        updateStatus.innerText = text;
+        if (color) updateStatus.style.color = color;
+    };
+
+    const updater = window.__TAURI_PLUGIN_UPDATER__ || (window.__TAURI__ && window.__TAURI__.updater);
+    if (!updater) {
+        setStatus('Updater not available in this build.', '#ef4444');
+        return;
+    }
+
+    if (updateInstalledPendingRestart) {
+        // Already downloaded and installed this session — just needs a restart.
+        setStatus('Update ready — restart to apply.', '#10b981');
+        return;
+    }
+
+    const update = await updater.check();
+    if (!update) {
+        setStatus('You are on the latest version.', '#10b981');
+        return;
+    }
+
+    setStatus(`Update found: v${update.version}. Downloading...`, '#3b82f6');
+    let downloaded = 0;
+    let contentLength = 0;
+
+    await update.downloadAndInstall((event) => {
+        switch (event.event) {
+            case 'Started':
+                contentLength = event.data.contentLength;
+                setStatus('Downloading... 0%');
+                break;
+            case 'Progress':
+                downloaded += event.data.chunkLength;
+                if (contentLength) {
+                    const percent = Math.round((downloaded / contentLength) * 100);
+                    setStatus(`Downloading... ${percent}%`);
+                }
+                break;
+            case 'Finished':
+                setStatus('Installing...');
+                break;
+        }
+    });
+
+    updateInstalledPendingRestart = true;
+
+    if (silent) {
+        // Background update: don't yank the app out from under the user.
+        console.log(`[Updater] v${update.version} installed in background; awaiting restart.`);
+        if (updateRestartBanner) updateRestartBanner.style.display = 'block';
+    } else {
+        setStatus('Update installed! Restarting...', '#10b981');
+        setTimeout(relaunchApp, 1500);
+    }
+}
+
+if (updateRestartBtn) {
+    updateRestartBtn.addEventListener('click', relaunchApp);
+}
 
 if (updateBtn) {
     updateBtn.addEventListener('click', async () => {
@@ -1093,53 +1174,7 @@ if (updateBtn) {
             updateStatus.innerText = 'Checking for updates...';
             updateStatus.style.color = '#888';
             updateBtn.disabled = true;
-
-            const updater = window.__TAURI_PLUGIN_UPDATER__ || (window.__TAURI__ && window.__TAURI__.updater);
-            if (!updater) {
-                updateStatus.innerText = 'Updater not available in this build.';
-                updateStatus.style.color = '#ef4444';
-                return;
-            }
-
-            const update = await updater.check();
-            if (update) {
-                updateStatus.innerText = `Update found: v${update.version}. Downloading...`;
-                updateStatus.style.color = '#3b82f6';
-                
-                let downloaded = 0;
-                let contentLength = 0;
-                
-                await update.downloadAndInstall((event) => {
-                    switch (event.event) {
-                        case 'Started':
-                            contentLength = event.data.contentLength;
-                            updateStatus.innerText = `Downloading... 0%`;
-                            break;
-                        case 'Progress':
-                            downloaded += event.data.chunkLength;
-                            if (contentLength) {
-                                const percent = Math.round((downloaded / contentLength) * 100);
-                                updateStatus.innerText = `Downloading... ${percent}%`;
-                            }
-                            break;
-                        case 'Finished':
-                            updateStatus.innerText = `Installing...`;
-                            break;
-                    }
-                });
-
-                updateStatus.innerText = 'Update installed! Restarting...';
-                updateStatus.style.color = '#10b981';
-                setTimeout(async () => {
-                    const process = window.__TAURI_PLUGIN_PROCESS__ || (window.__TAURI__ && window.__TAURI__.process);
-                    if (process && process.relaunch) {
-                        await process.relaunch();
-                    }
-                }, 1500);
-            } else {
-                updateStatus.innerText = 'You are on the latest version.';
-                updateStatus.style.color = '#10b981';
-            }
+            await checkAndInstallUpdate({ silent: false });
         } catch (error) {
             console.error('Update error:', error);
             updateStatus.innerText = `Update failed: ${error}`;
@@ -1153,4 +1188,18 @@ if (updateBtn) {
             }, 5000);
         }
     });
+}
+
+// Automatic background check: ~1 min after launch, then every 24h.
+// Runs only in the settings webview (mode=settings) so exactly one window
+// polls, and the restart banner is in the panel the user actually sees.
+{
+    const mode = new URLSearchParams(window.location.search).get('mode') || 'main';
+    if (mode === 'settings') {
+        const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+        const silentCheck = () => checkAndInstallUpdate({ silent: true })
+            .catch(err => console.error('[Updater] background check failed:', err));
+        setTimeout(silentCheck, 60 * 1000);
+        setInterval(silentCheck, AUTO_CHECK_INTERVAL_MS);
+    }
 }

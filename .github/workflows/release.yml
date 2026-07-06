@@ -1,4 +1,4 @@
-name: Release Geochron Engine
+name: Release Novaframe Engine
 
 on:
   push:
@@ -8,10 +8,17 @@ on:
 
 jobs:
   release:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
-        platform: [windows-latest]
+        include:
+          - platform: windows-latest
+            args: ''
+          - platform: macos-latest
+            # Universal binary: one artifact for Apple Silicon + Intel.
+            args: '--target universal-apple-darwin'
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -21,15 +28,80 @@ jobs:
           node-version: 20
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - name: install frontend dependencies
         run: npm install
       - name: build tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater artifact signing (minisign). The matching pubkey lives in
+          # src-tauri/tauri.conf.json. Key has no password.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
         with:
-          tagName: app-v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version
-          releaseName: 'Geochron Engine v__VERSION__'
+          tagName: app-v__VERSION__
+          releaseName: 'Novaframe Engine v__VERSION__'
           releaseBody: 'See the assets to download this version and install.'
-          releaseDraft: true
+          # Published immediately: the updates endpoint and download page read
+          # the latest *published* release — drafts are invisible to both.
+          releaseDraft: false
           prerelease: false
+          args: ${{ matrix.args }}
+
+  # Mirror the installers into the Supabase `engine-releases` bucket and mark
+  # the new version as latest in the engine_releases table, which is what the
+  # storefront /download page reads.
+  sync-to-supabase:
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: download release assets
+        run: |
+          VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir assets && cd assets
+          gh release download "app-v$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.exe' --pattern '*.dmg'
+          ls -la
+      - name: upload installers to Supabase storage
+        run: |
+          cd assets
+          WIN_FILE=$(ls *.exe | head -1)
+          MAC_FILE=$(ls *.dmg | head -1)
+          WIN_DEST="NovaframeEngine-Setup-$VERSION.exe"
+          MAC_DEST="NovaframeEngine-$VERSION.dmg"
+          for pair in "$WIN_FILE:$WIN_DEST" "$MAC_FILE:$MAC_DEST"; do
+            SRC="${pair%%:*}"; DEST="${pair##*:}"
+            echo "Uploading $SRC -> $DEST"
+            curl -sf -X POST \
+              "$SUPABASE_URL/storage/v1/object/engine-releases/$DEST" \
+              -H "Authorization: Bearer $SERVICE_KEY" \
+              -H "x-upsert: true" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$SRC" > /dev/null
+          done
+          echo "WIN_DEST=$WIN_DEST" >> "$GITHUB_ENV"
+          echo "MAC_DEST=$MAC_DEST" >> "$GITHUB_ENV"
+      - name: mark version as latest in engine_releases
+        run: |
+          # Demote previous latest, then insert the new row.
+          curl -sf -X PATCH \
+            "$SUPABASE_URL/rest/v1/engine_releases?is_latest=eq.true" \
+            -H "Authorization: Bearer $SERVICE_KEY" \
+            -H "apikey: $SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"is_latest": false}' > /dev/null
+          curl -sf -X POST \
+            "$SUPABASE_URL/rest/v1/engine_releases" \
+            -H "Authorization: Bearer $SERVICE_KEY" \
+            -H "apikey: $SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"version\": \"$VERSION\", \"windows_url\": \"$WIN_DEST\", \"mac_url\": \"$MAC_DEST\", \"release_notes\": \"Novaframe Engine v$VERSION\", \"is_latest\": true}" > /dev/null
+          echo "engine_releases updated to v$VERSION"
