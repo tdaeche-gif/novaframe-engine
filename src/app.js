@@ -181,6 +181,7 @@ const ThemeManager = {
             this.unmountIframe();
             this.currentThemePath = null;
             this.currentManifest = null;
+            setWelcomeVisible(true);
             return;
         }
 
@@ -227,6 +228,7 @@ const ThemeManager = {
 
     mountIframe(src, transparent, themePath) {
         this.unmountIframe();
+        setWelcomeVisible(false);
         const container = document.getElementById('container');
         if (!container) return;
         const iframe = document.createElement('iframe');
@@ -779,16 +781,22 @@ async function scanThemes() {
                 let label = entry.name;
                 let mode = 'unknown';
                 let custom_settings = null;
+                let theme_id = null;
+                let version = null;
                 try {
                     const { manifest } = await ThemeManager.readManifest(themePath);
                     if (manifest.name) label = `${manifest.name}`;
                     mode = manifest.render_mode || 'external-html';
                     if (manifest.custom_settings) custom_settings = manifest.custom_settings;
+                    // Used by checkThemeContentUpdates: theme_id is the
+                    // marketplace wallpaper UUID, version the installed build.
+                    theme_id = manifest.theme_id || null;
+                    version = manifest.version || null;
                 } catch (_) {
                     continue;
                 }
-                
-                ThemeManager.manifestCache[themePath] = { label, mode, custom_settings };
+
+                ThemeManager.manifestCache[themePath] = { label, mode, custom_settings, theme_id, version };
 
                 const option = document.createElement('option');
                 option.value = themePath;
@@ -1190,6 +1198,52 @@ if (updateBtn) {
     });
 }
 
+// ── First-run welcome overlay (main window) ────────────────────────────────
+// The main window is click-through, so the overlay only points the user at
+// the interactive right-edge settings tab; it can't hold buttons itself.
+function setWelcomeVisible(visible) {
+    const overlay = document.getElementById('welcomeOverlay');
+    if (!overlay) return;
+    const isMainWindow = (new URLSearchParams(window.location.search).get('mode') || 'main') === 'main';
+    overlay.style.display = visible && isMainWindow ? 'flex' : 'none';
+}
+
+// ── Theme content updates ───────────────────────────────────────────────────
+// Asks the backend which installed themes have a newer build published
+// (compares manifest.version against wallpapers.engine_manifest.version).
+// Refreshing still goes through the normal Vault re-apply flow — this only
+// surfaces the notice; it never downloads anything itself.
+async function checkThemeContentUpdates() {
+    const notice = document.getElementById('themeUpdatesNotice');
+    if (!notice) return;
+
+    const installed = Object.values(ThemeManager.manifestCache)
+        .filter(m => m.theme_id)
+        .map(m => ({ id: m.theme_id, version: m.version || '' }));
+    if (installed.length === 0) return;
+
+    try {
+        const res = await fetch('https://api.novaframe.co.uk/api/engine/check-theme-updates', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ themes: installed }),
+        });
+        if (!res.ok) return;
+        const { updates } = await res.json();
+        if (!Array.isArray(updates) || updates.length === 0) {
+            notice.style.display = 'none';
+            return;
+        }
+        const names = updates.map(u => u.title || u.id).join(', ');
+        notice.innerHTML =
+            `<strong>Wallpaper update available:</strong> ${names}. ` +
+            `Open the Marketplace, go to <strong>My Vault</strong> and hit Apply to refresh.`;
+        notice.style.display = 'block';
+    } catch (err) {
+        console.log('[ThemeUpdates] check failed (offline?):', err);
+    }
+}
+
 // Automatic background check: ~1 min after launch, then every 24h.
 // Runs only in the settings webview (mode=settings) so exactly one window
 // polls, and the restart banner is in the panel the user actually sees.
@@ -1199,7 +1253,19 @@ if (updateBtn) {
         const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
         const silentCheck = () => checkAndInstallUpdate({ silent: true })
             .catch(err => console.error('[Updater] background check failed:', err));
+        const themeCheck = () => checkThemeContentUpdates()
+            .catch(err => console.error('[ThemeUpdates] background check failed:', err));
         setTimeout(silentCheck, 60 * 1000);
         setInterval(silentCheck, AUTO_CHECK_INTERVAL_MS);
+        // Theme scan must have populated manifestCache first — scanThemes runs
+        // during initSettingsUI, well before this fires.
+        setTimeout(themeCheck, 20 * 1000);
+        setInterval(themeCheck, AUTO_CHECK_INTERVAL_MS);
+    } else {
+        // Main window: if nothing is mounted shortly after startup, this is a
+        // fresh install — show the welcome instructions.
+        setTimeout(() => {
+            if (!ThemeManager.currentManifest) setWelcomeVisible(true);
+        }, 2500);
     }
 }

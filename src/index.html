@@ -14,6 +14,27 @@
     <div id="container" style="position: relative; width: 100%; height: 100%;">
     </div>
 
+    <!-- First-run welcome (main window only, shown when no theme is installed).
+         The main window is click-through, so this is purely instructional —
+         it directs the user to the interactive right-edge settings tab. -->
+    <div id="welcomeOverlay" style="display:none; position:fixed; inset:0; z-index:5; align-items:center; justify-content:center; font-family:'Outfit',sans-serif; background:radial-gradient(ellipse at center, #10233f 0%, #060d1a 100%); color:#e4e4e7; text-align:center;">
+        <div style="max-width:520px; padding:32px;">
+            <img src="assets/logo.png" alt="Novaframe" style="width:64px; height:64px; border-radius:14px; margin-bottom:20px;">
+            <h1 style="margin:0 0 10px; font-size:28px; font-weight:700;">Welcome to Novaframe Engine</h1>
+            <p style="margin:0 0 24px; font-size:15px; color:#a1a1aa; line-height:1.6;">
+                No wallpapers are installed yet. Your desktop will come alive as soon as you apply one.
+            </p>
+            <div style="display:inline-block; text-align:left; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); border-radius:14px; padding:18px 22px; font-size:14px; line-height:2;">
+                <div><strong style="color:#34d399;">1.</strong> Move your mouse to the <strong>right edge</strong> of the screen</div>
+                <div><strong style="color:#34d399;">2.</strong> The <strong>⚙ settings tab</strong> slides open</div>
+                <div><strong style="color:#34d399;">3.</strong> Click <strong>Browse Marketplace</strong> and pick a wallpaper</div>
+            </div>
+            <div style="margin-top:26px; font-size:13px; color:#52525b;">Purchased wallpapers apply here automatically.</div>
+        </div>
+        <div style="position:fixed; right:18px; top:50%; transform:translateY(-50%); font-size:26px; animation:nfPulse 1.6s ease-in-out infinite;">➜</div>
+        <style>@keyframes nfPulse { 0%,100% { opacity:.35; transform:translateY(-50%) translateX(0);} 50% { opacity:1; transform:translateY(-50%) translateX(6px);} }</style>
+    </div>
+
     <div id="settingsPanel">
         <div class="panel-content">
             <div style="display: flex; align-items: center; gap: 10px;">
@@ -39,6 +60,7 @@
                 <button id="openStoreBtn" class="btn-primary">
                     Browse Marketplace
                 </button>
+                <div id="themeUpdatesNotice" style="display:none; margin-top:10px; padding:8px 10px; border-radius:8px; background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.35); font-size:12px; line-height:1.5;"></div>
             </div>
 
             <!-- Dynamic Custom Settings (injected based on manifest) -->
