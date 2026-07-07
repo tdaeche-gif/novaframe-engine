@@ -57,6 +57,14 @@ fn expand_settings_panel(window: tauri::WebviewWindow) {
 fn collapse_settings_panel(window: tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         let scale_factor = monitor.scale_factor();
+        // Windows: shrink the collapsed window to exactly the cog height so the
+        // WebView2/DWM layered-window outline can't draw a faint 600px-tall
+        // border down the right edge. macOS renders the transparent column
+        // cleanly, and a full-height window there gives a much larger
+        // hover-to-expand target — so keep 600 on non-Windows.
+        #[cfg(target_os = "windows")]
+        let logical_height = 40.0;
+        #[cfg(not(target_os = "windows"))]
         let logical_height = 600.0;
         let logical_width = 40.0;
         let monitor_h = monitor.size().height as f64 / scale_factor;
@@ -79,6 +87,14 @@ fn collapse_settings_panel(window: tauri::WebviewWindow) {
 #[tauri::command]
 fn log_from_js(message: String) {
     println!("[JS] {}", message);
+}
+
+/// Fully quit the engine (all windows + the wallpaper underlay process) from the
+/// settings-panel exit button, so users don't have to kill it via Task Manager.
+#[tauri::command]
+fn quit_engine(app: tauri::AppHandle) {
+    println!("[Novaframe] quit_engine invoked — exiting.");
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -109,10 +125,7 @@ async fn download_and_install_theme(
     theme_id: String,
     wallpaper_title: Option<String>,
 ) -> Result<String, String> {
-    use futures_util::StreamExt;
     use std::fs;
-    use std::io::{Read, Write};
-    use std::path::Path;
 
     let app_data_dir = app
         .path()
@@ -126,37 +139,63 @@ async fn download_and_install_theme(
             .map_err(|e| format!("Failed to create themes dir: {}", e))?;
     }
 
-    // Prepare temp file path
-    let temp_zip_path = std::env::temp_dir().join(format!("{}.zip", theme_id));
+    // Temp zip lives in a per-install file guarded by TempFileGuard so it is
+    // removed on EVERY exit path (success, download error, bad zip, missing
+    // manifest) — no leaked archives piling up in the OS temp dir.
+    let temp_zip_path = std::env::temp_dir().join(format!("novaframe-{}.zip", theme_id));
+    let _zip_guard = TempFileGuard(temp_zip_path.clone());
+
+    // Staging dir: extract here first, validate, then atomically swap into the
+    // final location. The live theme dir is never partially overwritten, so a
+    // crash/kill mid-install can't corrupt an already-installed theme (fixes the
+    // Windows "blank dropdown / corrupted folder" class of failures).
+    let staging_dir = themes_dir.join(format!(".staging-{}", theme_id));
+    let _ = fs::remove_dir_all(&staging_dir); // clear any prior aborted staging
+    let _staging_guard = TempDirGuard(staging_dir.clone());
 
     println!("[Novaframe] Downloading theme {} from {}", theme_id, url);
 
-    // Download using reqwest
-    let response = reqwest::get(&url)
-        .await
-        .map_err(|e| format!("Failed to fetch: {}", e))?;
+    // Bounded client: a stalled CDN/connection must not hang the install
+    // forever (the settings panel would sit "installing…" with no recovery).
+    // connect_timeout guards the handshake; timeout caps the whole request.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
-    if !response.status().is_success() {
-        return Err(format!(
-            "Download failed with status: {}",
-            response.status()
-        ));
+    // Retry transient network failures (dropped connection, timeout, 5xx) a
+    // couple of times with backoff before giving up — a flaky moment shouldn't
+    // fail an otherwise-valid install. Each attempt re-truncates the temp file.
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut last_err = String::new();
+    let mut downloaded = false;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match download_to_file(&client, &url, &temp_zip_path).await {
+            Ok(()) => {
+                downloaded = true;
+                break;
+            }
+            Err(e) => {
+                last_err = e;
+                println!(
+                    "[Novaframe] Download attempt {}/{} failed: {}",
+                    attempt, MAX_ATTEMPTS, last_err
+                );
+                if attempt < MAX_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500 * attempt as u64))
+                        .await;
+                }
+            }
+        }
     }
-
-    let mut temp_file = fs::File::create(&temp_zip_path)
-        .map_err(|e| format!("Failed to create temp file: {}", e))?;
-
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Error while downloading: {}", e))?;
-        temp_file
-            .write_all(&chunk)
-            .map_err(|e| format!("Error writing chunk: {}", e))?;
+    if !downloaded {
+        return Err(format!("Download failed after {} attempts: {}", MAX_ATTEMPTS, last_err));
     }
 
     println!(
-        "[Novaframe] Download complete, extracting to {:?}",
-        themes_dir
+        "[Novaframe] Download complete, extracting to staging {:?}",
+        staging_dir
     );
 
     // Extract using zip crate
@@ -165,12 +204,8 @@ async fn download_and_install_theme(
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {}", e))?;
 
-    let target_theme_dir = themes_dir.join(&theme_id);
-
-    if !target_theme_dir.exists() {
-        fs::create_dir_all(&target_theme_dir)
-            .map_err(|e| format!("Failed to create target theme dir: {}", e))?;
-    }
+    fs::create_dir_all(&staging_dir)
+        .map_err(|e| format!("Failed to create staging dir: {}", e))?;
 
     for i in 0..archive.len() {
         let mut file = archive
@@ -184,9 +219,15 @@ async fn download_and_install_theme(
             continue;
         }
 
+        // Reject anything the zip crate flags as escaping the archive root
+        // (zip-slip / absolute paths) before we derive an output path from it.
+        if file.enclosed_name().is_none() {
+            continue;
+        }
+
         // Strip any single top-level directory inside the archive so files land
-        // directly under <themes_dir>/<theme_id>/. e.g. archive contains
-        // "myTheme/index.html" → we want .../themes/<theme_id>/index.html
+        // directly under <staging_dir>/. e.g. archive contains
+        // "myTheme/index.html" → we want <staging_dir>/index.html
         let stripped = entry_name
             .splitn(2, '/')
             .nth(1)
@@ -200,10 +241,13 @@ async fn download_and_install_theme(
             stripped
         };
 
-        let outpath = match file.enclosed_name() {
-            Some(_) => target_theme_dir.join(&relative_path),
-            None => continue,
-        };
+        let outpath = staging_dir.join(&relative_path);
+
+        // Belt-and-suspenders: never let a joined path escape the staging root.
+        if !outpath.starts_with(&staging_dir) {
+            println!("[Novaframe] Skipping zip entry outside staging root: {}", entry_name);
+            continue;
+        }
 
         if entry_name.ends_with('/') {
             fs::create_dir_all(&outpath).unwrap_or_default();
@@ -220,48 +264,157 @@ async fn download_and_install_theme(
         }
     }
 
-    // Clean up
-    let _ = fs::remove_file(temp_zip_path);
+    // ── Validate the extracted theme before it ever reaches the dropdown ─────
+    // A valid zip missing a manifest would otherwise install a dead theme that
+    // shows in the list and silently fails to load. Reject it here instead.
+    let has_manifest = staging_dir.join("engine_manifest.json").exists()
+        || staging_dir.join("manifest.json").exists();
+    if !has_manifest {
+        return Err(
+            "Downloaded theme is missing its manifest (engine_manifest.json / manifest.json). \
+             The file may be corrupt — please try Apply again."
+                .to_string(),
+        );
+    }
 
-    // ── Rename install dir from UUID → human-readable title ─────────────────
-    // This makes the settings-panel dropdown show "Ignis: Interactive Solar Wind"
-    // instead of a raw UUID. Falls back to the UUID folder name if no title was
-    // supplied (shouldn't happen with the new listener, but defensive).
+    // ── Resolve the final human-readable install dir ─────────────────────────
+    // Dropdown labels come from manifest.name, so the folder name is cosmetic —
+    // but we keep it human-readable for anyone browsing AppData. Falls back to
+    // the UUID if no title was supplied.
     let display_name = wallpaper_title
         .as_deref()
         .map(|t| sanitize_dir_name(t))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| theme_id.clone());
 
-    let named_dir = themes_dir.join(&display_name);
+    // First, purge any prior install of THIS same theme_id — even if it lived
+    // under a different folder name (e.g. the wallpaper was retitled in the
+    // marketplace between installs). Prevents duplicate dropdown entries.
+    remove_installed_theme_dirs(&themes_dir, &theme_id, Some(&staging_dir));
 
-    if named_dir != target_theme_dir {
-        if named_dir.exists() {
-            // Same-named theme already installed — remove the stale one first so
-            // scanThemes doesn't pick up duplicate entries.
-            let _ = fs::remove_dir_all(&named_dir);
+    // Collision handling: if a folder with this title already exists and belongs
+    // to a DIFFERENT wallpaper, suffix ours with a short id slice so we don't
+    // clobber the other theme.
+    let mut final_name = display_name.clone();
+    let mut named_dir = themes_dir.join(&final_name);
+    if named_dir.exists() {
+        let existing_id = read_installed_theme_id(&named_dir);
+        if existing_id.as_deref() != Some(theme_id.as_str()) {
+            let short: String = theme_id.chars().take(8).collect();
+            final_name = format!("{}-{}", display_name, short);
+            named_dir = themes_dir.join(&final_name);
         }
-        // Rename the just-extracted UUID folder to the human-readable name.
-        if let Err(e) = fs::rename(&target_theme_dir, &named_dir) {
-            println!(
-                "[Novaframe] Rename UUID → title failed ({}); keeping UUID folder name.",
-                e
-            );
-        }
+        let _ = fs::remove_dir_all(&named_dir);
     }
 
-    println!(
-        "[Novaframe] Theme installed successfully at {:?}",
-        if named_dir.exists() { &named_dir } else { &target_theme_dir }
-    );
+    // Atomic swap: staging and final are on the same filesystem (both under
+    // themes_dir), so rename is atomic and can't leave a half-populated dir.
+    fs::rename(&staging_dir, &named_dir)
+        .map_err(|e| format!("Failed to move staged theme into place: {}", e))?;
 
-    // Notify the main window that a theme was installed
+    println!("[Novaframe] Theme installed successfully at {:?}", named_dir);
+
+    // Notify all windows that a theme was installed.
     use tauri::Emitter;
-    let final_dir = if named_dir.exists() { &named_dir } else { &target_theme_dir };
-    let absolute_path = final_dir.to_string_lossy().to_string();
+    let absolute_path = named_dir.to_string_lossy().to_string();
     let _ = app.emit("theme-installed", absolute_path);
 
-    Ok(display_name)
+    Ok(final_name)
+}
+
+/// Removes the temp zip on drop, whatever the exit path.
+struct TempFileGuard(std::path::PathBuf);
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Removes the staging dir on drop. On the success path the dir has already been
+/// renamed away, so this is a no-op then; on any error path it cleans the
+/// partially-extracted staging tree.
+struct TempDirGuard(std::path::PathBuf);
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Download `url` into `dest`, truncating any existing file. One attempt — the
+/// caller wraps this in a retry loop.
+async fn download_to_file(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &std::path::Path,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Download failed with status: {}", response.status()));
+    }
+
+    let mut temp_file =
+        std::fs::File::create(dest).map_err(|e| format!("Failed to create temp file: {}", e))?;
+
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Error while downloading: {}", e))?;
+        temp_file
+            .write_all(&chunk)
+            .map_err(|e| format!("Error writing chunk: {}", e))?;
+    }
+    temp_file
+        .flush()
+        .map_err(|e| format!("Error flushing temp file: {}", e))?;
+    Ok(())
+}
+
+/// Read the marketplace theme_id recorded in an installed theme's manifest.
+fn read_installed_theme_id(theme_dir: &std::path::Path) -> Option<String> {
+    for name in ["engine_manifest.json", "manifest.json"] {
+        if let Ok(bytes) = std::fs::read(theme_dir.join(name)) {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(id) = json.get("theme_id").and_then(|v| v.as_str()) {
+                    return Some(id.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Remove every installed theme dir whose manifest theme_id matches `theme_id`,
+/// except an optional `keep` directory. Used to dedupe prior installs of the
+/// same wallpaper before writing the new one.
+fn remove_installed_theme_dirs(
+    themes_dir: &std::path::Path,
+    theme_id: &str,
+    keep: Option<&std::path::Path>,
+) {
+    let entries = match std::fs::read_dir(themes_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if keep.map(|k| k == path.as_path()).unwrap_or(false) {
+            continue;
+        }
+        if read_installed_theme_id(&path).as_deref() == Some(theme_id) {
+            println!("[Novaframe] Removing prior install of theme {}: {:?}", theme_id, path);
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
 }
 
 /// Sanitize a wallpaper title for use as a directory name:
@@ -360,9 +513,14 @@ fn handle_theme_protocol(
         .ok()
         .map(|d| d.join("themes"))
         .and_then(|d| d.canonicalize().ok());
+    // Local wallpaper source tree — only allowed in dev builds so a personal
+    // path is never baked into shipped release binaries.
+    #[cfg(debug_assertions)]
     let dev_root = std::path::PathBuf::from("/Users/tdaeche/Novaframe-Wallpapers")
         .canonicalize()
         .ok();
+    #[cfg(not(debug_assertions))]
+    let dev_root: Option<std::path::PathBuf> = None;
 
     let allowed = [themes_root, dev_root]
         .iter()
@@ -390,11 +548,23 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if let Ok(Some(monitor)) = window.current_monitor() {
             let scale_factor = monitor.scale_factor();
-            let logical_size = monitor.size().to_logical::<f64>(scale_factor);
-            let logical_pos = monitor.position().to_logical::<f64>(scale_factor);
 
-            let _ = window.set_size(tauri::Size::Logical(logical_size));
-            let _ = window.set_position(tauri::Position::Logical(logical_pos));
+            // Windows: pass the monitor's raw physical bounds straight through.
+            // Converting to logical and back introduces sub-pixel rounding that
+            // leaves a ~1px gap on the screen edge (desktop shows through). macOS
+            // (retina) sizes correctly via logical coords, so keep that path.
+            #[cfg(target_os = "windows")]
+            {
+                let _ = window.set_size(tauri::Size::Physical(*monitor.size()));
+                let _ = window.set_position(tauri::Position::Physical(*monitor.position()));
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let logical_size = monitor.size().to_logical::<f64>(scale_factor);
+                let logical_pos = monitor.position().to_logical::<f64>(scale_factor);
+                let _ = window.set_size(tauri::Size::Logical(logical_size));
+                let _ = window.set_position(tauri::Position::Logical(logical_pos));
+            }
 
             if let Some(settings_window) = app.get_webview_window("settings") {
                 let current_width = if let Ok(size) = settings_window.inner_size() {
@@ -642,7 +812,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, open_storefront_window, download_and_install_theme, get_themes_dir, get_hardware_id])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, get_themes_dir, get_hardware_id])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }

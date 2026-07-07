@@ -1,3 +1,17 @@
+// Highest theme manifest_version this engine build knows how to render. A theme
+// may set `manifest_version` in its manifest; if it declares a higher version
+// than this, the engine can't guarantee correct rendering and skips it (prompting
+// an engine update) rather than rendering it wrong. Manifests without the field
+// are treated as v1 (the current format). Bump this whenever the manifest schema
+// gains a breaking change.
+const ENGINE_MANIFEST_VERSION = 1;
+
+// True if a manifest requires a newer engine than this build supports.
+function manifestNeedsNewerEngine(manifest) {
+    const v = Number(manifest?.manifest_version);
+    return Number.isFinite(v) && v > ENGINE_MANIFEST_VERSION;
+}
+
 // Helper to resolve the themes directory path in AppData dynamically
 async function getThemesDir() {
     try {
@@ -18,14 +32,29 @@ async function getThemesDir() {
 // breaking every relative subresource inside the theme), this keeps real
 // directory segments so `./img.jpg` and `fetch('./shaders/x.frag')` resolve.
 function toThemeUrl(fsPath) {
-    const encoded = fsPath.split('/').map(encodeURIComponent).join('/');
+    // Normalize Windows backslashes to '/' before segmenting. Rust's
+    // app_data_dir returns paths like C:\Users\..\themes\Name, and JS also
+    // concatenates candidates with '/', producing mixed separators. Without
+    // this, the entire theme dir collapses into one percent-encoded segment
+    // (backslashes → %5C) instead of real path segments — which breaks every
+    // relative subresource inside a theme (`./img.jpg`, `fetch('./x.frag')`)
+    // on Windows. Encoding each real segment keeps those relative URLs resolving.
+    const normalized = fsPath.replace(/\\/g, '/');
+    const encoded = normalized.split('/').map(encodeURIComponent).join('/');
     const lead = encoded.startsWith('/') ? '' : '/';
     // Windows/Android webviews expose custom schemes as http://<scheme>.localhost
-    const isWindows = navigator.userAgent.includes('Windows');
-    return isWindows
+    return IS_WINDOWS_WEBVIEW
         ? `http://theme.localhost${lead}${encoded}`
         : `theme://localhost${lead}${encoded}`;
 }
+
+// Detect the host platform once at module load rather than per-call. The custom
+// scheme host differs by webview (WebView2 on Windows exposes theme://localhost
+// as http://theme.localhost), so this drives every theme URL. Kept as a UA check
+// (reliable on WebView2/WKWebView) to avoid pulling the async os plugin into the
+// synchronous toThemeUrl hot path.
+const IS_WINDOWS_WEBVIEW = typeof navigator !== 'undefined'
+    && /Windows/i.test(navigator.userAgent || '');
 
 // Keep the docked settings panel expanded while a native <select> has its OS
 // popup open. The popup renders outside the panel window's own frame (often
@@ -194,6 +223,14 @@ const ThemeManager = {
         }
 
         const manifest = parsed.manifest;
+
+        // Forward-compat guard: refuse to render a theme built for a newer
+        // manifest schema than this engine understands. Better a clear no-op +
+        // console note than a silently broken render.
+        if (manifestNeedsNewerEngine(manifest)) {
+            console.warn(`[Novaframe] Not loading "${manifest.name || themePath}": manifest_version ${manifest.manifest_version} needs a newer engine (supports ${ENGINE_MANIFEST_VERSION}). Update Novaframe.`);
+            return;
+        }
 
         // Idempotency guard: skip the full render path if the theme is already
         // active (manifest + path match). Prevents double-mounts when an echo
@@ -756,6 +793,29 @@ async function initSettingsUI() {
     // 3. Synchronously apply UI layout scoping
     updateSettingsScope(activeTheme);
 
+    // 4. Wire the exit button — fully quits the engine so the user never needs
+    // Task Manager. Keep the panel locked open while the confirm dialog is up so
+    // the hover-poll loop can't collapse the window out from under it.
+    const quitBtn = document.getElementById('quitEngineBtn');
+    if (quitBtn) {
+        quitBtn.addEventListener('click', async () => {
+            setPanelLocked(true);
+            const ok = window.confirm('Close Novaframe Engine? Your wallpaper will stop until you reopen it.');
+            if (!ok) {
+                setPanelLocked(false);
+                return;
+            }
+            try {
+                await window.__TAURI__.core.invoke('quit_engine');
+            } catch (err) {
+                console.error('[Novaframe] quit_engine invoke failed, falling back to process.exit:', err);
+                const proc = window.__TAURI_PLUGIN_PROCESS__ || (window.__TAURI__ && window.__TAURI__.process);
+                if (proc && proc.exit) {
+                    await proc.exit(0);
+                }
+            }
+        });
+    }
 }
 
 // ── Dynamic Theme Scanner (Module 1) ───────────────────────────────────────
@@ -776,7 +836,9 @@ async function scanThemes() {
         
         for (const entry of entries) {
             const isDir = entry.isDirectory === true || Array.isArray(entry.children);
-            if (isDir && entry.name) {
+            // Skip dotfolders — e.g. the transient `.staging-<id>` dir the Rust
+            // installer uses mid-install. They aren't user themes.
+            if (isDir && entry.name && !entry.name.startsWith('.')) {
                 const themePath = `${themesDir}/${entry.name}`;
                 let label = entry.name;
                 let mode = 'unknown';
@@ -785,6 +847,13 @@ async function scanThemes() {
                 let version = null;
                 try {
                     const { manifest } = await ThemeManager.readManifest(themePath);
+                    // Forward-compat: a theme built for a newer manifest schema
+                    // is kept out of the dropdown so the engine never renders a
+                    // format it doesn't understand.
+                    if (manifestNeedsNewerEngine(manifest)) {
+                        console.warn(`[Novaframe] Skipping "${manifest.name || entry.name}": manifest_version ${manifest.manifest_version} needs a newer engine (supports ${ENGINE_MANIFEST_VERSION}).`);
+                        continue;
+                    }
                     if (manifest.name) label = `${manifest.name}`;
                     mode = manifest.render_mode || 'external-html';
                     if (manifest.custom_settings) custom_settings = manifest.custom_settings;
@@ -851,105 +920,12 @@ async function scanThemes() {
         });
     }
 
-    // Maps the backend's stable error codes ({ error, code }) to messages a
-    // user can act on. Codes are defined in marketplace-backend/src/utils/apiError.ts.
-    function friendlyApiError(data) {
-        switch (data?.code) {
-            case 'UNAUTHORIZED':
-                return "Your session could not be verified. Please open the marketplace and sign in again.";
-            case 'TOKEN_EXPIRED':
-                return "This install link has expired. Please click Apply on the wallpaper again in the marketplace.";
-            case 'NOT_PURCHASED':
-                return "This wallpaper hasn't been purchased on your account. If you just bought it, wait a few seconds and try again.";
-            case 'DEVICE_LIMIT':
-                return "You've reached the 2-device limit for this wallpaper. Open My Vault in the marketplace to reset your devices, then try again.";
-            case 'NOT_FOUND':
-                return "This wallpaper is no longer available in the marketplace.";
-            case 'SERVER_ERROR':
-                return "The marketplace server hit a problem. Please try again in a minute.";
-            default:
-                return "License verification failed: " + (data?.error || "unknown error");
-        }
-    }
-
-    if (window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen) {
-        window.__TAURI__.event.listen('engine-apply-theme', async (event) => {
-            const TAG = '[Main]';
-            const stamp = `[${Date.now() % 100000}]`;
-            const token = event?.payload;
-            console.log(TAG, stamp, 'engine-apply-theme listener fired. payload type:', typeof token, 'length:', token?.length ?? 'null');
-            console.log("[Novaframe] Received apply theme request from deep link with token:", token);
-
-            try {
-                // Hardware fingerprint for device-locked purchases. If the Rust
-                // command fails we still verify — the backend treats a missing
-                // hardwareId as a legacy client and skips enforcement.
-                let hardwareId = null;
-                try {
-                    hardwareId = await window.__TAURI__.core.invoke('get_hardware_id');
-                } catch (hwErr) {
-                    console.error(TAG, stamp, 'get_hardware_id failed:', hwErr);
-                }
-
-                console.log(TAG, stamp, 'POST /api/engine/verify-token ...');
-                const response = await fetch('https://api.novaframe.co.uk/api/engine/verify-token', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token, hardwareId })
-                });
-                console.log(TAG, stamp, 'verify-token responded with HTTP', response.status);
-
-                const data = await response.json();
-
-                if (response.ok && data.success) {
-                    const wallpaperId = data.wallpaper.id;
-                    const downloadUrl = data.wallpaper.downloadUrl;
-                    const wallpaperTitle = data.wallpaper.title;
-                    console.log(TAG, stamp, 'verify-token OK. wallpaperId=', wallpaperId, 'title=', JSON.stringify(wallpaperTitle), 'downloadUrl length=', downloadUrl?.length ?? 0);
-
-                    // Call the Rust command to download and install the theme
-                    console.log(TAG, stamp, `Invoking Rust download_and_install_theme themeId=${wallpaperId} title=${wallpaperTitle} ...`);
-                    let installedThemeId;
-                    try {
-                        // Tauri v2 serializes Rust function arguments as camelCase on the
-                        // JS side. Rust declares `theme_id` / `wallpaper_title` but the JS
-                        // keys must be camelCase: `themeId` / `wallpaperTitle`.
-                        installedThemeId = await window.__TAURI__.core.invoke('download_and_install_theme', {
-                            url: downloadUrl,
-                            themeId: wallpaperId,
-                            wallpaperTitle: wallpaperTitle
-                        });
-                        console.log(TAG, stamp, `✅ Rust install returned dir=${installedThemeId}`);
-                    } catch (rustErr) {
-                        console.error(TAG, stamp, '❌ Rust download_and_install_theme rejected:', rustErr);
-                        alert('Engine install command rejected: ' + (rustErr?.message ?? rustErr));
-                        return;
-                    }
-
-                    console.log(`[Novaframe] Theme ${installedThemeId} installed successfully! Loading it...`);
-
-                    // Switch to the newly installed theme
-                    const themesDir = await getThemesDir();
-                    const absoluteThemePath = `${themesDir}/${installedThemeId}`;
-                    await ConfigManager.setTheme(absoluteThemePath);
-                    console.log(TAG, stamp, 'ConfigManager.setTheme ok. Reloading main window...');
-
-                    // Full reload — scanThemes() will re-run on load and select the new theme
-                    window.location.reload();
-                } else {
-                    console.error(TAG, stamp, 'verify-token returned !ok || !success:', data);
-                    console.error("Token verification failed:", data.error);
-                    alert(friendlyApiError(data));
-                }
-            } catch (err) {
-                console.error(TAG, stamp, '❌ exception in listener:', err);
-                console.error("Error verifying token:", err);
-                alert("Error verifying license token.");
-            }
-        });
-    } else {
-        console.error('[Main] window.__TAURI__.event.listen is NOT available. The event cannot be received.');
-    }
+    // NOTE: the `engine-apply-theme` deep-link listener used to be registered
+    // here. It was moved to module scope (registerEngineApplyListener) so it is
+    // registered exactly once — this function re-runs on every reload and can
+    // early-return/throw before reaching this point, which on Windows left the
+    // deep link either unhandled (blank dropdown) or handled by a stale/duplicate
+    // listener racing a concurrent install.
 
     // Lock the panel open while the native dropdown popup is open (mousedown
     // covers pointer-opened popups, focus covers keyboard-opened ones). Unlock
@@ -966,6 +942,118 @@ async function scanThemes() {
         // settings-window listener will update its own dropdown highlight +
         // scope when it echoes back. The main-window listener will re-render.
         await ConfigManager.setTheme(selected);
+    });
+}
+
+// Maps the backend's stable error codes ({ error, code }) to messages a
+// user can act on. Codes are defined in marketplace-backend/src/utils/apiError.ts.
+function friendlyApiError(data) {
+    switch (data?.code) {
+        case 'UNAUTHORIZED':
+            return "Your session could not be verified. Please open the marketplace and sign in again.";
+        case 'TOKEN_EXPIRED':
+            return "This install link has expired. Please click Apply on the wallpaper again in the marketplace.";
+        case 'NOT_PURCHASED':
+            return "This wallpaper hasn't been purchased on your account. If you just bought it, wait a few seconds and try again.";
+        case 'DEVICE_LIMIT':
+            return "You've reached the 2-device limit for this wallpaper. Open My Vault in the marketplace to reset your devices, then try again.";
+        case 'NOT_FOUND':
+            return "This wallpaper is no longer available in the marketplace.";
+        case 'SERVER_ERROR':
+            return "The marketplace server hit a problem. Please try again in a minute.";
+        default:
+            return "License verification failed: " + (data?.error || "unknown error");
+    }
+}
+
+// Guard so the deep-link listener is bound exactly once per JS context. Deep
+// links (novaframe://apply?token=…) are emitted from Rust to ALL windows; only
+// the settings window performs the download/install to avoid two windows racing
+// the same extract+rename (which on Windows corrupts the theme dir → blank
+// dropdown). Registered from DOMContentLoaded, decoupled from scanThemes so a
+// failed theme scan can never leave the deep link unhandled.
+let engineApplyListenerRegistered = false;
+function registerEngineApplyListener() {
+    if (engineApplyListenerRegistered) return;
+    if (!(window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen)) {
+        console.error('[Main] window.__TAURI__.event.listen is NOT available. The deep-link event cannot be received.');
+        return;
+    }
+    engineApplyListenerRegistered = true;
+
+    window.__TAURI__.event.listen('engine-apply-theme', async (event) => {
+        const TAG = '[Main]';
+        const stamp = `[${Date.now() % 100000}]`;
+        const token = event?.payload;
+        console.log(TAG, stamp, 'engine-apply-theme listener fired. payload type:', typeof token, 'length:', token?.length ?? 'null');
+        console.log("[Novaframe] Received apply theme request from deep link with token:", token);
+
+        try {
+            // Hardware fingerprint for device-locked purchases. If the Rust
+            // command fails we still verify — the backend treats a missing
+            // hardwareId as a legacy client and skips enforcement.
+            let hardwareId = null;
+            try {
+                hardwareId = await window.__TAURI__.core.invoke('get_hardware_id');
+            } catch (hwErr) {
+                console.error(TAG, stamp, 'get_hardware_id failed:', hwErr);
+            }
+
+            console.log(TAG, stamp, 'POST /api/engine/verify-token ...');
+            const response = await fetch('https://api.novaframe.co.uk/api/engine/verify-token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token, hardwareId })
+            });
+            console.log(TAG, stamp, 'verify-token responded with HTTP', response.status);
+
+            const data = await response.json();
+
+            if (response.ok && data.success) {
+                const wallpaperId = data.wallpaper.id;
+                const downloadUrl = data.wallpaper.downloadUrl;
+                const wallpaperTitle = data.wallpaper.title;
+                console.log(TAG, stamp, 'verify-token OK. wallpaperId=', wallpaperId, 'title=', JSON.stringify(wallpaperTitle), 'downloadUrl length=', downloadUrl?.length ?? 0);
+
+                // Call the Rust command to download and install the theme
+                console.log(TAG, stamp, `Invoking Rust download_and_install_theme themeId=${wallpaperId} title=${wallpaperTitle} ...`);
+                let installedThemeId;
+                try {
+                    // Tauri v2 serializes Rust function arguments as camelCase on the
+                    // JS side. Rust declares `theme_id` / `wallpaper_title` but the JS
+                    // keys must be camelCase: `themeId` / `wallpaperTitle`.
+                    installedThemeId = await window.__TAURI__.core.invoke('download_and_install_theme', {
+                        url: downloadUrl,
+                        themeId: wallpaperId,
+                        wallpaperTitle: wallpaperTitle
+                    });
+                    console.log(TAG, stamp, `✅ Rust install returned dir=${installedThemeId}`);
+                } catch (rustErr) {
+                    console.error(TAG, stamp, '❌ Rust download_and_install_theme rejected:', rustErr);
+                    alert('Engine install command rejected: ' + (rustErr?.message ?? rustErr));
+                    return;
+                }
+
+                console.log(`[Novaframe] Theme ${installedThemeId} installed successfully! Loading it...`);
+
+                // Rust emits `theme-installed` on success, which both windows already
+                // listen for (that handler sets the theme + reloads). Setting it here
+                // too is harmless (idempotent) and keeps the flow working even if the
+                // event is missed.
+                const themesDir = await getThemesDir();
+                const absoluteThemePath = `${themesDir}/${installedThemeId}`;
+                await ConfigManager.setTheme(absoluteThemePath);
+                console.log(TAG, stamp, 'ConfigManager.setTheme ok.');
+            } else {
+                console.error(TAG, stamp, 'verify-token returned !ok || !success:', data);
+                console.error("Token verification failed:", data.error);
+                alert(friendlyApiError(data));
+            }
+        } catch (err) {
+            console.error(TAG, stamp, '❌ exception in listener:', err);
+            console.error("Error verifying token:", err);
+            alert("Error verifying license token.");
+        }
     });
 }
 
@@ -1012,6 +1100,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         const isSettingsWindow = window.location.search.includes('mode=settings');
         if (isSettingsWindow) {
             initSettingsUI();
+            // Exactly one window handles the deep-link download/install; the
+            // settings window is always alive (never destroyed/collapsed away)
+            // and is the one the marketplace deep link focuses. Registering in
+            // both windows would race the same install.
+            registerEngineApplyListener();
         }
 
         if (window.__TAURI__.event) {

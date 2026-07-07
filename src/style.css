@@ -152,6 +152,30 @@ canvas {
     margin-top: 16px;
 }
 
+/* Red exit button, top-right of the panel header. Lets the user fully close
+   the engine (Rust quit_engine → app.exit) without hunting through Task Manager. */
+#quitEngineBtn {
+    margin-left: auto;
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    cursor: pointer;
+    color: #f87171;
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    transition: all 0.15s ease;
+}
+#quitEngineBtn:hover {
+    color: #fff;
+    background: #ef4444;
+    border-color: #ef4444;
+}
+
 /* Headers, hr, helpers (unchanged from original) */
 #settingsPanel h3 {
     margin: 0 0 8px 0;
