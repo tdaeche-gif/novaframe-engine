@@ -823,7 +823,7 @@ async function scanThemes() {
     const selector = document.getElementById('themeSelector');
     if (!selector) return;
     
-    selector.innerHTML = '<option value="" disabled>Select a Theme...</option>';
+    selector.innerHTML = '<option value="" disabled selected>Select Wallpaper</option>';
     
     const tauriFs = window.__TAURI_PLUGIN_FS__ || (window.__TAURI__ && window.__TAURI__.fs);
     if (!tauriFs) return;

@@ -290,23 +290,30 @@ async fn download_and_install_theme(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| theme_id.clone());
 
-    // First, purge any prior install of THIS same theme_id — even if it lived
-    // under a different folder name (e.g. the wallpaper was retitled in the
-    // marketplace between installs). Prevents duplicate dropdown entries.
-    remove_installed_theme_dirs(&themes_dir, &theme_id, Some(&staging_dir));
+    // Record the MARKETPLACE id (the UUID passed to install) in a sidecar so
+    // future installs can reliably dedupe. We can't dedupe on the manifest's
+    // `theme_id` field — that's set by the wallpaper author and is a different
+    // namespace from the marketplace UUID, which is exactly why the old logic
+    // produced duplicate "Ignis" folders.
+    let meta = serde_json::json!({ "marketplace_id": theme_id }).to_string();
+    let _ = fs::write(staging_dir.join(".nova_meta.json"), meta);
 
-    // Collision handling: if a folder with this title already exists and belongs
-    // to a DIFFERENT wallpaper, suffix ours with a short id slice so we don't
-    // clobber the other theme.
+    // Purge every prior install of this same wallpaper:
+    //  - any dir whose sidecar marketplace_id matches (survives retitles), and
+    //  - legacy dirs (no sidecar) whose folder name is this title or this title
+    //    with a "-<id>" suffix (cleans up pre-sidecar duplicates like the two
+    //    existing "Ignis…" and "Ignis…-7a5880e7" folders).
+    purge_prior_installs(&themes_dir, &theme_id, &display_name, &staging_dir);
+
+    // If a folder with this exact title still exists, it belongs to a DIFFERENT
+    // wallpaper (it has a sidecar with a different id — purge left it alone), so
+    // suffix ours to avoid clobbering it.
     let mut final_name = display_name.clone();
     let mut named_dir = themes_dir.join(&final_name);
     if named_dir.exists() {
-        let existing_id = read_installed_theme_id(&named_dir);
-        if existing_id.as_deref() != Some(theme_id.as_str()) {
-            let short: String = theme_id.chars().take(8).collect();
-            final_name = format!("{}-{}", display_name, short);
-            named_dir = themes_dir.join(&final_name);
-        }
+        let short: String = theme_id.chars().take(8).collect();
+        final_name = format!("{}-{}", display_name, short);
+        named_dir = themes_dir.join(&final_name);
         let _ = fs::remove_dir_all(&named_dir);
     }
 
@@ -379,42 +386,46 @@ async fn download_to_file(
     Ok(())
 }
 
-/// Read the marketplace theme_id recorded in an installed theme's manifest.
-fn read_installed_theme_id(theme_dir: &std::path::Path) -> Option<String> {
-    for name in ["engine_manifest.json", "manifest.json"] {
-        if let Ok(bytes) = std::fs::read(theme_dir.join(name)) {
-            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let Some(id) = json.get("theme_id").and_then(|v| v.as_str()) {
-                    return Some(id.to_string());
-                }
-            }
-        }
-    }
-    None
+/// Read the marketplace id recorded in an installed theme's `.nova_meta.json`
+/// sidecar (written at install time). None for legacy installs without it.
+fn read_marketplace_id(theme_dir: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(theme_dir.join(".nova_meta.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    json.get("marketplace_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
-/// Remove every installed theme dir whose manifest theme_id matches `theme_id`,
-/// except an optional `keep` directory. Used to dedupe prior installs of the
-/// same wallpaper before writing the new one.
-fn remove_installed_theme_dirs(
+/// Remove prior installs of the same wallpaper before writing the new one:
+///   - any dir whose sidecar marketplace_id matches (survives marketplace
+///     retitles), and
+///   - legacy dirs with NO sidecar whose folder name is `display_name` or
+///     `display_name-<suffix>` (cleans up pre-sidecar duplicates).
+/// A dir belonging to a DIFFERENT wallpaper (sidecar present, different id) is
+/// left untouched. `keep` (the staging dir) is always skipped.
+fn purge_prior_installs(
     themes_dir: &std::path::Path,
     theme_id: &str,
-    keep: Option<&std::path::Path>,
+    display_name: &str,
+    keep: &std::path::Path,
 ) {
     let entries = match std::fs::read_dir(themes_dir) {
         Ok(e) => e,
         Err(_) => return,
     };
+    let suffix_prefix = format!("{}-", display_name);
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
+        if !path.is_dir() || path == keep {
             continue;
         }
-        if keep.map(|k| k == path.as_path()).unwrap_or(false) {
-            continue;
-        }
-        if read_installed_theme_id(&path).as_deref() == Some(theme_id) {
-            println!("[Novaframe] Removing prior install of theme {}: {:?}", theme_id, path);
+        let fname = entry.file_name().to_string_lossy().to_string();
+        let sidecar = read_marketplace_id(&path);
+        let same_marketplace = sidecar.as_deref() == Some(theme_id);
+        let legacy_title_match =
+            sidecar.is_none() && (fname == display_name || fname.starts_with(&suffix_prefix));
+        if same_marketplace || legacy_title_match {
+            println!("[Novaframe] Purging prior install: {:?}", path);
             let _ = std::fs::remove_dir_all(&path);
         }
     }
@@ -607,8 +618,43 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
             // (retina) sizes correctly via logical coords, so keep that path.
             #[cfg(target_os = "windows")]
             {
-                let _ = window.set_size(tauri::Size::Physical(*monitor.size()));
-                let _ = window.set_position(tauri::Position::Physical(*monitor.position()));
+                let mon_size = *monitor.size();
+                let mon_pos = *monitor.position();
+                let _ = window.set_size(tauri::Size::Physical(mon_size));
+                let _ = window.set_position(tauri::Position::Physical(mon_pos));
+
+                // Borderless Windows windows still carry an invisible DWM resize
+                // frame, so the client (webview) area sits ~8px INSIDE the outer
+                // rect. outer_pos=(0,0) therefore renders the wallpaper starting
+                // at x≈8 — an 8px desktop gap on the left + everything shifted
+                // right. Measure the client inset (inner vs outer position) and
+                // shift the outer rect out by that much so the CLIENT top-left
+                // lands exactly on the monitor origin. Also grow the size by the
+                // full frame so the client covers the whole monitor.
+                if let (Ok(inner), Ok(outer_pos), Ok(outer_size), Ok(inner_size)) = (
+                    window.inner_position(),
+                    window.outer_position(),
+                    window.outer_size(),
+                    window.inner_size(),
+                ) {
+                    let dx = inner.x - outer_pos.x; // left frame inset
+                    let dy = inner.y - outer_pos.y; // top frame inset
+                    let frame_w = outer_size.width.saturating_sub(inner_size.width);
+                    let frame_h = outer_size.height.saturating_sub(inner_size.height);
+                    if dx != 0 || dy != 0 || frame_w != 0 || frame_h != 0 {
+                        let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+                            mon_size.width + frame_w,
+                            mon_size.height + frame_h,
+                        )));
+                        let _ = window.set_position(tauri::Position::Physical(
+                            tauri::PhysicalPosition::new(mon_pos.x - dx, mon_pos.y - dy),
+                        ));
+                    }
+                    dlog(app, &format!(
+                        "[layout] frame inset dx={} dy={} frame_w={} frame_h={} -> client aligned to monitor origin",
+                        dx, dy, frame_w, frame_h
+                    ));
+                }
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -618,12 +664,9 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
                 let _ = window.set_position(tauri::Position::Logical(logical_pos));
             }
 
-            // Read back what the OS actually applied — reveals whether the
-            // desktop-underlay reparent (or DPI) shifted the window off (0,0),
-            // which is what produces the left-edge gap.
             dlog(app, &format!(
-                "[layout] main AFTER set: outer_pos={:?} outer_size={:?}",
-                window.outer_position(), window.outer_size()
+                "[layout] main AFTER set: outer_pos={:?} outer_size={:?} inner_pos={:?} inner_size={:?}",
+                window.outer_position(), window.outer_size(), window.inner_position(), window.inner_size()
             ));
 
             if let Some(settings_window) = app.get_webview_window("settings") {
@@ -753,23 +796,14 @@ fn main() {
                     let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
                 }
 
-                // Log the main window position AFTER underlay reparent. If this
-                // differs from the "[layout] main AFTER set" line, the underlay
-                // shifted it — the cause of the left-edge gap. Re-assert bounds
-                // once here in case the reparent moved it.
+                // Re-run the full layout pass AFTER the underlay reparent so the
+                // frame-inset correction (see adjust_window_layouts) is applied
+                // to the final window state, not the pre-reparent one.
                 dlog(&handle, &format!(
                     "[Novaframe] main POST-underlay: outer_pos={:?} outer_size={:?}",
                     window.outer_position(), window.outer_size()
                 ));
-                #[cfg(target_os = "windows")]
-                if let Ok(Some(monitor)) = window.current_monitor() {
-                    let _ = window.set_size(tauri::Size::Physical(*monitor.size()));
-                    let _ = window.set_position(tauri::Position::Physical(*monitor.position()));
-                    dlog(&handle, &format!(
-                        "[Novaframe] main RE-ASSERTED bounds: outer_pos={:?} outer_size={:?}",
-                        window.outer_position(), window.outer_size()
-                    ));
-                }
+                adjust_window_layouts(&handle);
 
                 #[cfg(target_os = "macos")]
                 {

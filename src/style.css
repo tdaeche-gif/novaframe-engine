@@ -70,12 +70,14 @@ canvas {
     left: 0;
     top: 50%;
     transform: translateY(-50%);
-    width: 40px;
+    width: 41px; /* 40 + 1px overlap into the content wall to kill the seam */
     height: 40px;
     margin-top: 0;
-    background: rgba(10, 15, 26, 0.75);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-right: none;
+    /* Match .panel-content's surface exactly and drop the border so the cog
+       reads as a rounded tab that's part of the panel, not a separate floating
+       box with padding around it. */
+    background: rgba(10, 15, 26, 0.78);
+    border: none;
     border-radius: 12px 0 0 12px;
     display: flex;
     justify-content: center;
@@ -115,9 +117,11 @@ canvas {
     background: rgba(10, 15, 26, 0.78);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
+    /* Straight left wall (no left border/radius) so the cog tab abuts it
+       seamlessly — no notch, no double line between tab and panel. */
     border: 1px solid rgba(255, 255, 255, 0.08);
-    border-right: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 12px 0 0 12px;
+    border-left: none;
+    border-radius: 0;
     overflow-y: auto;
     overflow-x: hidden;
     display: flex;
