@@ -85,8 +85,10 @@ fn collapse_settings_panel(window: tauri::WebviewWindow) {
 }
 
 #[tauri::command]
-fn log_from_js(message: String) {
-    println!("[JS] {}", message);
+fn log_from_js(app: tauri::AppHandle, message: String) {
+    // Route JS console into the on-disk log too — the webview console is just as
+    // invisible as stdout on a release (GUI-subsystem) Windows build.
+    dlog(&app, &format!("[JS] {}", message));
 }
 
 /// Fully quit the engine (all windows + the wallpaper underlay process) from the
@@ -153,7 +155,7 @@ async fn download_and_install_theme(
     let _ = fs::remove_dir_all(&staging_dir); // clear any prior aborted staging
     let _staging_guard = TempDirGuard(staging_dir.clone());
 
-    println!("[Novaframe] Downloading theme {} from {}", theme_id, url);
+    dlog(&app, &format!("[install] START theme_id={} title={:?} url_len={}", theme_id, wallpaper_title, url.len()));
 
     // Bounded client: a stalled CDN/connection must not hang the install
     // forever (the settings panel would sit "installing…" with no recovery).
@@ -269,6 +271,7 @@ async fn download_and_install_theme(
     // shows in the list and silently fails to load. Reject it here instead.
     let has_manifest = staging_dir.join("engine_manifest.json").exists()
         || staging_dir.join("manifest.json").exists();
+    dlog(&app, &format!("[install] extracted OK, has_manifest={} staging={:?}", has_manifest, staging_dir));
     if !has_manifest {
         return Err(
             "Downloaded theme is missing its manifest (engine_manifest.json / manifest.json). \
@@ -312,7 +315,7 @@ async fn download_and_install_theme(
     fs::rename(&staging_dir, &named_dir)
         .map_err(|e| format!("Failed to move staged theme into place: {}", e))?;
 
-    println!("[Novaframe] Theme installed successfully at {:?}", named_dir);
+    dlog(&app, &format!("[install] DONE installed at {:?} -> emitting theme-installed", named_dir));
 
     // Notify all windows that a theme was installed.
     use tauri::Emitter;
@@ -482,6 +485,29 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 /// single URL segment, which breaks every relative subresource inside a theme
 /// (`./img.jpg`, `fetch('./shaders/x.frag')`). Serving with real directory segments
 /// lets relative URLs resolve natively.
+/// Append a line to AppData/engine-debug.log. Release builds run as a Windows
+/// GUI-subsystem app with NO console, so println! is invisible in the field —
+/// this file is the only way to see what actually happened on a user's machine.
+/// Best-effort: never panics, silently no-ops if the path is unavailable.
+fn dlog(app: &tauri::AppHandle, msg: &str) {
+    use std::io::Write;
+    println!("{}", msg);
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("engine-debug.log"))
+        {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = writeln!(f, "[{}] {}", ts, msg);
+        }
+    }
+}
+
 fn handle_theme_protocol(
     app: &tauri::AppHandle,
     request: &tauri::http::Request<Vec<u8>>,
@@ -498,12 +524,30 @@ fn handle_theme_protocol(
         Ok(s) => s.into_owned(),
         Err(_) => return deny(400),
     };
+
+    // Windows custom-scheme URLs arrive with the path as "/C:/Users/..." — a
+    // leading slash BEFORE the drive letter that PathBuf/canonicalize can't
+    // resolve, so every manifest/asset fetch 404s and the dropdown ends up empty.
+    // Strip that leading slash when it precedes a "<drive>:" prefix.
+    #[cfg(target_os = "windows")]
+    let decoded = {
+        let b = decoded.as_bytes();
+        if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+            decoded[1..].to_string()
+        } else {
+            decoded
+        }
+    };
+
     let fs_path = std::path::PathBuf::from(&decoded);
 
     // Canonicalize to defeat ../ traversal; 404 if the file doesn't exist.
     let canon = match fs_path.canonicalize() {
         Ok(p) => p,
-        Err(_) => return deny(404),
+        Err(e) => {
+            dlog(app, &format!("[theme://] 404 canonicalize FAILED path={:?} err={}", decoded, e));
+            return deny(404);
+        }
     };
 
     // Allowlist roots: installed themes + local dev wallpaper source tree.
@@ -527,19 +571,22 @@ fn handle_theme_protocol(
         .flatten()
         .any(|root| canon.starts_with(root));
     if !allowed {
-        println!("[theme://] DENIED (outside allowed roots): {:?}", canon);
+        dlog(app, &format!("[theme://] 403 DENIED (outside allowed roots): {:?}", canon));
         return deny(403);
     }
 
     match std::fs::read(&canon) {
-        Ok(bytes) => tauri::http::Response::builder()
-            .status(200)
-            .header("Content-Type", mime_for(&canon))
-            // Required: the main window (tauri://localhost origin) fetches manifests
-            // cross-origin from theme://localhost.
-            .header("Access-Control-Allow-Origin", "*")
-            .body(bytes)
-            .unwrap(),
+        Ok(bytes) => {
+            dlog(app, &format!("[theme://] 200 served {} bytes: {:?}", bytes.len(), canon));
+            tauri::http::Response::builder()
+                .status(200)
+                .header("Content-Type", mime_for(&canon))
+                // Required: the main window (tauri://localhost origin) fetches manifests
+                // cross-origin from theme://localhost.
+                .header("Access-Control-Allow-Origin", "*")
+                .body(bytes)
+                .unwrap()
+        }
         Err(_) => deny(404),
     }
 }
@@ -548,6 +595,11 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if let Ok(Some(monitor)) = window.current_monitor() {
             let scale_factor = monitor.scale_factor();
+
+            dlog(app, &format!(
+                "[layout] monitor name={:?} phys_size={:?} phys_pos={:?} scale={}",
+                monitor.name(), monitor.size(), monitor.position(), scale_factor
+            ));
 
             // Windows: pass the monitor's raw physical bounds straight through.
             // Converting to logical and back introduces sub-pixel rounding that
@@ -565,6 +617,14 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
                 let _ = window.set_size(tauri::Size::Logical(logical_size));
                 let _ = window.set_position(tauri::Position::Logical(logical_pos));
             }
+
+            // Read back what the OS actually applied — reveals whether the
+            // desktop-underlay reparent (or DPI) shifted the window off (0,0),
+            // which is what produces the left-edge gap.
+            dlog(app, &format!(
+                "[layout] main AFTER set: outer_pos={:?} outer_size={:?}",
+                window.outer_position(), window.outer_size()
+            ));
 
             if let Some(settings_window) = app.get_webview_window("settings") {
                 let current_width = if let Ok(size) = settings_window.inner_size() {
@@ -618,6 +678,9 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
 
+            dlog(&handle, &format!("==== engine start v{} os={} ====",
+                env!("CARGO_PKG_VERSION"), std::env::consts::OS));
+
             // On Windows/Linux the novaframe:// scheme lives in the registry /
             // desktop files. The NSIS installer registers it, but re-assert at
             // runtime so portable/dev builds and moved installs still work.
@@ -633,14 +696,19 @@ fn main() {
             handle.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
                     let url_str = url.as_str();
-                    println!("Received deep link: {}", url_str);
+                    dlog(&dl_handle, &format!("[deeplink] received: {}", url_str));
                     if url_str.starts_with("novaframe://apply") {
                         if let Some(query) = url.query() {
                             // Basic extraction of token= param
                             if let Some(token) = query.split('&').find(|p| p.starts_with("token=")).map(|p| p.trim_start_matches("token=")) {
                                 // Send event to JS frontend to handle verification
+                                dlog(&dl_handle, &format!("[deeplink] emitting engine-apply-theme token_len={}", token.len()));
                                 let _ = dl_handle.emit("engine-apply-theme", token);
+                            } else {
+                                dlog(&dl_handle, "[deeplink] no token= param found in query");
                             }
+                        } else {
+                            dlog(&dl_handle, "[deeplink] apply URL had no query string");
                         }
                     }
                 }
@@ -674,15 +742,33 @@ fn main() {
                 // instead of swallowing them (a failed underlay leaves a
                 // full-screen window sitting over the desktop eating clicks).
                 if let Err(e) = window.set_desktop_underlay(true) {
-                    println!("[Novaframe] set_desktop_underlay failed: {}", e);
+                    dlog(&handle, &format!("[Novaframe] set_desktop_underlay failed: {}", e));
                 }
                 if let Err(e) = window.set_ignore_cursor_events(true) {
-                    println!("[Novaframe] set_ignore_cursor_events failed: {}", e);
+                    dlog(&handle, &format!("[Novaframe] set_ignore_cursor_events failed: {}", e));
                 }
 
                 #[cfg(target_os = "windows")]
                 {
                     let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+                }
+
+                // Log the main window position AFTER underlay reparent. If this
+                // differs from the "[layout] main AFTER set" line, the underlay
+                // shifted it — the cause of the left-edge gap. Re-assert bounds
+                // once here in case the reparent moved it.
+                dlog(&handle, &format!(
+                    "[Novaframe] main POST-underlay: outer_pos={:?} outer_size={:?}",
+                    window.outer_position(), window.outer_size()
+                ));
+                #[cfg(target_os = "windows")]
+                if let Ok(Some(monitor)) = window.current_monitor() {
+                    let _ = window.set_size(tauri::Size::Physical(*monitor.size()));
+                    let _ = window.set_position(tauri::Position::Physical(*monitor.position()));
+                    dlog(&handle, &format!(
+                        "[Novaframe] main RE-ASSERTED bounds: outer_pos={:?} outer_size={:?}",
+                        window.outer_position(), window.outer_size()
+                    ));
                 }
 
                 #[cfg(target_os = "macos")]
@@ -712,6 +798,17 @@ fn main() {
             }
 
             if let Some(settings_window) = app.get_webview_window("settings") {
+                // WebView2 renders a `transparent: true` window's unpainted
+                // regions as OPAQUE unless the background color is explicitly set
+                // to fully transparent. Without this the 40px strip left of the
+                // panel content (everything except the cog + panel body) shows as
+                // a solid block — the cog appears to have "its own section". The
+                // main window already does this; the settings window was missed.
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = settings_window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+                }
+
                 #[cfg(target_os = "macos")]
                 {
                     let settings_clone = settings_window.clone();
