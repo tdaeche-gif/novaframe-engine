@@ -70,25 +70,25 @@ canvas {
     left: 0;
     top: 50%;
     transform: translateY(-50%);
-    width: 41px; /* 40 + 1px overlap into the content wall to kill the seam */
-    height: 40px;
+    width: 30px;
+    height: 30px;
     margin-top: 0;
-    /* Match .panel-content's surface exactly and drop the border so the cog
-       reads as a rounded tab that's part of the panel, not a separate floating
-       box with padding around it. */
-    background: rgba(10, 15, 26, 0.78);
+    /* Square (no radius) so the wallpaper can't bleed through rounded corners,
+       and opaque enough (no backdrop-filter) that nothing behind shows through.
+       Only ever visible in the collapsed state — hidden while the panel is open
+       (see the min-width media query below), which removes the empty overlay
+       above/below the cog inside the expanded panel. */
+    background: rgba(10, 15, 26, 0.95);
     border: none;
-    border-radius: 12px 0 0 12px;
+    border-radius: 0;
     display: flex;
     justify-content: center;
     align-items: center;
     cursor: pointer;
     z-index: 10000;
     color: rgba(255, 255, 255, 0.65);
-    transition: color 0.3s, border-color 0.3s, background 0.3s;
+    transition: color 0.3s, background 0.3s;
     pointer-events: auto;
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
 }
 
 .cog-icon {
@@ -99,8 +99,7 @@ canvas {
 
 .panel-handle:hover {
     color: #00a2ff;
-    border-color: rgba(0, 162, 255, 0.5);
-    background: rgba(10, 15, 26, 0.9);
+    background: rgba(10, 15, 26, 0.98);
 }
 .panel-handle:hover .cog-icon {
     transform: rotate(180deg);
@@ -140,15 +139,21 @@ canvas {
 }
 
 @media (max-width: 100px) {
+    /* Collapsed window (~40px): cog is the only visible affordance. */
     .panel-content {
         opacity: 0;
         pointer-events: none;
     }
 }
 @media (min-width: 101px) {
+    /* Expanded window (~360px): show the panel and HIDE the cog so there's no
+       leftover overlay above/below it inside the open panel. */
     .panel-content {
         opacity: 1;
         pointer-events: auto;
+    }
+    .panel-handle {
+        display: none;
     }
 }
 
