@@ -1,6 +1,6 @@
 [package]
 name = "novaframe_engine"
-version = "0.1.0"
+version = "0.2.5"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -14,7 +14,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # Updated to ensure compatibility with recent Rust toolchains
-tauri = { version = "2", features = ["protocol-asset", "macos-private-api"] }
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "tray-icon"] }
+# Launch the engine on OS login so the wallpaper persists across reboots.
+tauri-plugin-autostart = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"
@@ -42,6 +44,12 @@ tokio = { version = "1.52.3", features = ["full"] }
 objc2 = "0.6.4"
 objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# SHQueryUserNotificationState — detects a fullscreen game/presentation so the
+# wallpaper render can be paused (GPU/battery). Reuses the same windows crate
+# version Tauri already pulls in, so no duplicate compilation.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

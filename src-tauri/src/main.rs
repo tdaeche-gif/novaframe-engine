@@ -20,9 +20,46 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // as hovered unconditionally so it can't collapse mid-selection.
 static SETTINGS_PANEL_LOCKED: AtomicBool = AtomicBool::new(false);
 
+// ── Wallpaper pause coordination ────────────────────────────────────────────
+// The wallpaper render is paused (render loop suspended in the theme iframe)
+// when ANY of these are true. Each input sets its own flag, then calls
+// recompute_wallpaper_visibility, which emits the single "occlusion-change"
+// event (payload = is_visible) the frontend already consumes. Keeping them
+// separate means a fullscreen game ending doesn't un-pause a manual pause, etc.
+static MANUAL_PAUSE: AtomicBool = AtomicBool::new(false); // tray "Pause Wallpaper"
+static FULLSCREEN_ACTIVE: AtomicBool = AtomicBool::new(false); // Windows fullscreen app
+static WINDOW_OCCLUDED: AtomicBool = AtomicBool::new(false); // macOS occlusion
+
+/// Emit the combined visibility state to the frontend. Visible only when nothing
+/// wants the wallpaper paused.
+fn recompute_wallpaper_visibility(app: &tauri::AppHandle) {
+    let paused = MANUAL_PAUSE.load(Ordering::Relaxed)
+        || FULLSCREEN_ACTIVE.load(Ordering::Relaxed)
+        || WINDOW_OCCLUDED.load(Ordering::Relaxed);
+    let _ = app.emit("occlusion-change", !paused);
+}
+
 #[tauri::command]
 fn get_hardware_id() -> Result<String, String> {
     machine_uid::get().map_err(|e| e.to_string())
+}
+
+// ── Autostart (launch on login) ─────────────────────────────────────────────
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    if enabled {
+        mgr.enable().map_err(|e| e.to_string())
+    } else {
+        mgr.disable().map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -696,6 +733,89 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
     }
 }
 
+/// Build the system-tray icon + menu (Show Settings / Pause / Quit). Best-effort:
+/// logs and returns on failure rather than aborting startup.
+fn build_tray(app: &tauri::AppHandle) {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::TrayIconBuilder;
+
+    let show = match MenuItem::with_id(app, "tray_show", "Show Settings", true, None::<&str>) {
+        Ok(i) => i,
+        Err(e) => return dlog(app, &format!("[tray] item build failed: {}", e)),
+    };
+    let pause = match MenuItem::with_id(app, "tray_pause", "Pause Wallpaper", true, None::<&str>) {
+        Ok(i) => i,
+        Err(e) => return dlog(app, &format!("[tray] item build failed: {}", e)),
+    };
+    let quit = match MenuItem::with_id(app, "tray_quit", "Quit Novaframe", true, None::<&str>) {
+        Ok(i) => i,
+        Err(e) => return dlog(app, &format!("[tray] item build failed: {}", e)),
+    };
+    let sep = match PredefinedMenuItem::separator(app) {
+        Ok(s) => s,
+        Err(e) => return dlog(app, &format!("[tray] separator build failed: {}", e)),
+    };
+    let menu = match Menu::with_items(app, &[&show, &pause, &sep, &quit]) {
+        Ok(m) => m,
+        Err(e) => return dlog(app, &format!("[tray] menu build failed: {}", e)),
+    };
+
+    // Kept so the menu event handler can flip the label between Pause/Resume.
+    let pause_item = pause.clone();
+
+    let mut builder = TrayIconBuilder::with_id("main-tray")
+        .tooltip("Novaframe Engine")
+        .menu(&menu)
+        .on_menu_event(move |app, event| match event.id.as_ref() {
+            "tray_show" => {
+                if let Some(w) = app.get_webview_window("settings") {
+                    let _ = w.set_focus();
+                    expand_settings_panel(w);
+                }
+            }
+            "tray_pause" => {
+                let paused = !MANUAL_PAUSE.load(Ordering::Relaxed);
+                MANUAL_PAUSE.store(paused, Ordering::Relaxed);
+                recompute_wallpaper_visibility(app);
+                let _ = pause_item.set_text(if paused {
+                    "Resume Wallpaper"
+                } else {
+                    "Pause Wallpaper"
+                });
+            }
+            "tray_quit" => app.exit(0),
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+
+    if let Err(e) = builder.build(app) {
+        dlog(app, &format!("[tray] build failed: {}", e));
+    }
+}
+
+/// True when a fullscreen game / video / presentation is in the foreground, so
+/// the wallpaper render should be paused to free the GPU.
+#[cfg(target_os = "windows")]
+fn is_fullscreen_app_active() -> bool {
+    use windows::Win32::UI::Shell::{
+        SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE,
+        QUNS_RUNNING_D3D_FULL_SCREEN,
+    };
+    unsafe {
+        match SHQueryUserNotificationState() {
+            Ok(state) => {
+                state == QUNS_BUSY
+                    || state == QUNS_RUNNING_D3D_FULL_SCREEN
+                    || state == QUNS_PRESENTATION_MODE
+            }
+            Err(_) => false,
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         // Must be the first plugin registered. Without it, clicking a
@@ -710,6 +830,12 @@ fn main() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // Launch on login. Args "--minimized" lets us tell an autostarted launch
+        // apart from a manual one if we ever want to skip showing the panel.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
         .plugin(tauri_plugin_desktop_underlay::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
@@ -758,6 +884,51 @@ fn main() {
             });
 
             adjust_window_layouts(&app.handle().clone());
+
+            // ── First-run: enable autostart once ────────────────────────────
+            // A wallpaper should persist across reboots, so default it ON — but
+            // only the first time, so a user who later turns it off stays off.
+            // A marker file in app_data records that we've done the default.
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                if let Ok(dir) = handle.path().app_data_dir() {
+                    let marker = dir.join(".autostart_initialized");
+                    if !marker.exists() {
+                        let _ = std::fs::create_dir_all(&dir);
+                        match handle.autolaunch().enable() {
+                            Ok(_) => dlog(&handle, "[autostart] enabled by default (first run)"),
+                            Err(e) => dlog(&handle, &format!("[autostart] default enable failed: {}", e)),
+                        }
+                        let _ = std::fs::write(&marker, b"1");
+                    }
+                }
+            }
+
+            // ── System tray ─────────────────────────────────────────────────
+            build_tray(&handle);
+
+            // ── Pause-on-fullscreen (Windows) ───────────────────────────────
+            // macOS already pauses via the occlusion loop (a fullscreen app
+            // occludes the desktop wallpaper window). Windows needs an explicit
+            // check: SHQueryUserNotificationState reports when a fullscreen game
+            // / presentation is running so we can suspend the render loop.
+            #[cfg(target_os = "windows")]
+            {
+                let fs_handle = handle.clone();
+                std::thread::spawn(move || {
+                    let mut last = false;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(800));
+                        let fullscreen = is_fullscreen_app_active();
+                        if fullscreen != last {
+                            last = fullscreen;
+                            FULLSCREEN_ACTIVE.store(fullscreen, Ordering::Relaxed);
+                            recompute_wallpaper_visibility(&fs_handle);
+                            dlog(&fs_handle, &format!("[pause] fullscreen app active={}", fullscreen));
+                        }
+                    }
+                });
+            }
 
             // Spawn monitor configuration polling thread
             let handle_clone = handle.clone();
@@ -808,6 +979,7 @@ fn main() {
                 #[cfg(target_os = "macos")]
                 {
                     let main_window_clone = window.clone();
+                    let occ_handle = handle.clone();
                     std::thread::spawn(move || {
                         let mut last_visible = true;
                         loop {
@@ -822,7 +994,12 @@ fn main() {
                                     let is_visible = (state & 2) != 0; // NSWindowOcclusionStateVisible is 1 << 1 (2)
                                     if is_visible != last_visible {
                                         last_visible = is_visible;
-                                        let _ = main_window_clone.emit("occlusion-change", is_visible);
+                                        // Feed the pause coordinator instead of
+                                        // emitting directly, so a manual (tray)
+                                        // pause isn't overridden when occlusion
+                                        // toggles back to visible.
+                                        WINDOW_OCCLUDED.store(!is_visible, Ordering::Relaxed);
+                                        recompute_wallpaper_visibility(&occ_handle);
                                     }
                                 }
                             }
@@ -943,7 +1120,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, get_themes_dir, get_hardware_id])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, get_themes_dir, get_hardware_id, set_autostart, get_autostart])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }

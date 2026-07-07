@@ -816,6 +816,27 @@ async function initSettingsUI() {
             }
         });
     }
+
+    // 5. Wire the "Launch on startup" toggle — reflects the real OS state and
+    // writes changes through the Rust set_autostart command.
+    const autostartToggle = document.getElementById('autostartToggle');
+    if (autostartToggle && window.__TAURI__?.core?.invoke) {
+        try {
+            autostartToggle.checked = await window.__TAURI__.core.invoke('get_autostart');
+        } catch (err) {
+            console.error('[Novaframe] get_autostart failed:', err);
+        }
+        autostartToggle.addEventListener('change', async (e) => {
+            const enabled = e.target.checked;
+            try {
+                await window.__TAURI__.core.invoke('set_autostart', { enabled });
+            } catch (err) {
+                console.error('[Novaframe] set_autostart failed:', err);
+                // Revert the UI if the OS call failed.
+                e.target.checked = !enabled;
+            }
+        });
+    }
 }
 
 // ── Dynamic Theme Scanner (Module 1) ───────────────────────────────────────

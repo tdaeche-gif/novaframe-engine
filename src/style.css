@@ -239,6 +239,48 @@ canvas {
     margin-top: 16px;
 }
 
+/* Toggle switch row (Launch on startup, etc.) */
+.toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    margin-bottom: 0;
+    font-size: 14px;
+    gap: 12px;
+}
+.toggle-row input[type="checkbox"] {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+.toggle-track {
+    flex-shrink: 0;
+    position: relative;
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    background: rgba(255, 255, 255, 0.15);
+    transition: background 0.2s ease;
+}
+.toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.2s ease;
+}
+.toggle-row input[type="checkbox"]:checked ~ .toggle-track {
+    background: #10b981;
+}
+.toggle-row input[type="checkbox"]:checked ~ .toggle-track .toggle-thumb {
+    transform: translateX(18px);
+}
+
 /* Theme Scope Hiding */
 #settingsPanel[data-theme-scope="dynamic"] #legacySection { display: none; }
 #settingsPanel[data-theme-scope="legacy"]  #legacySection { display: block; }
