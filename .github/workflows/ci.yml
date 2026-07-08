@@ -1,0 +1,53 @@
+name: CI
+
+# Fast pre-release gate: compile-check the Tauri crate on every push to main and
+# every PR, BEFORE a release tag is cut. release.yml only runs on `v*` tags, so
+# without this a compile break could sit on main until someone tries to release.
+#
+# Runs on windows + macos because the engine is heavily #[cfg(target_os = ...)]
+# gated (WorkerW/underlay on Windows, objc2/NSWindow on macOS) — a check on a
+# single OS silently skips the other platform's code.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Blocking: must compile on both platforms. This is the real gate.
+      - name: cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      # Non-blocking for now (continue-on-error) so pre-existing style/lint debt
+      # doesn't red-gate the build. Flip these to blocking once the codebase is
+      # clean: remove continue-on-error.
+      - name: rustfmt (advisory)
+        continue-on-error: true
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: clippy (advisory)
+        continue-on-error: true
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
