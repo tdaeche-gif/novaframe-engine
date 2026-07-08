@@ -136,15 +136,34 @@ fn quit_engine(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+// Sync (not async) so it runs on the main thread — window creation must.
 #[tauri::command]
-async fn open_storefront_window(app: tauri::AppHandle) -> Result<(), String> {
+fn open_storefront_window(app: tauri::AppHandle) -> Result<(), String> {
+    // Already open (or a previous session left it around): just focus it.
     if let Some(window) = app.get_webview_window("storefront") {
         window.show().map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
-        Ok(())
-    } else {
-        Err("storefront window not registered".into())
+        return Ok(());
     }
+
+    // Lazily create the storefront. It used to be declared in tauri.conf.json,
+    // so Tauri built its WebView2 at startup and the hidden marketplace page ran
+    // continuously in the background (~20% CPU on Windows). Now it only exists
+    // while the user has the store open; closing it (decorated window → X)
+    // destroys the webview and frees the cost. Reopening rebuilds it.
+    let url = tauri::WebviewUrl::External(
+        "https://www.novaframe.co.uk/explore?source=engine"
+            .parse()
+            .map_err(|_| "invalid storefront url".to_string())?,
+    );
+    tauri::WebviewWindowBuilder::new(&app, "storefront", url)
+        .title("Novaframe Marketplace")
+        .inner_size(1280.0, 800.0)
+        .resizable(true)
+        .decorations(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -946,6 +965,22 @@ fn main() {
                             adjust_window_layouts(&handle_clone);
                         }
                     }
+
+                    // Safety net: re-assert even when the monitor set is unchanged
+                    // if the main window has drifted from its monitor's size (the
+                    // startup reparent race can leave it at the config 1920x1080).
+                    // Without this a static non-1080p display would stay wrong.
+                    #[cfg(target_os = "windows")]
+                    if let Some(w) = handle_clone.get_webview_window("main") {
+                        if let (Ok(sz), Ok(Some(mon))) = (w.inner_size(), w.current_monitor()) {
+                            let ms = mon.size();
+                            let dw = (sz.width as i64 - ms.width as i64).abs();
+                            let dh = (sz.height as i64 - ms.height as i64).abs();
+                            if dw > 2 || dh > 2 {
+                                adjust_window_layouts(&handle_clone);
+                            }
+                        }
+                    }
                 }
             });
 
@@ -975,6 +1010,25 @@ fn main() {
                     window.outer_position(), window.outer_size()
                 ));
                 adjust_window_layouts(&handle);
+
+                // The WorkerW reparent above resets the window bounds, and the OS
+                // can apply that reset ASYNCHRONOUSLY — landing after the
+                // synchronous re-layout on line above, leaving the window at its
+                // config 1920x1080. On a non-1080p monitor (e.g. 1440p) that shows
+                // as a wallpaper that doesn't fill the screen, and the monitor-poll
+                // thread only re-fires when the monitor set *changes*, so a static
+                // display never self-corrects. Re-assert the layout a few times
+                // over the first ~1.3s to win the race against the reparent reset.
+                #[cfg(target_os = "windows")]
+                {
+                    let retry_handle = handle.clone();
+                    std::thread::spawn(move || {
+                        for delay in [150u64, 400, 800] {
+                            std::thread::sleep(std::time::Duration::from_millis(delay));
+                            adjust_window_layouts(&retry_handle);
+                        }
+                    });
+                }
 
                 #[cfg(target_os = "macos")]
                 {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Novaframe",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "identifier": "com.novaframe.desktop.wallpaper",
   "build": {
     "frontendDist": "../src"
@@ -36,18 +36,6 @@
         "resizable": false,
         "visible": true,
         "url": "index.html?mode=settings"
-      },
-      {
-        "label": "storefront",
-        "title": "Novaframe Marketplace",
-        "url": "https://www.novaframe.co.uk/explore?source=engine",
-        "width": 1280,
-        "height": 800,
-        "visible": false,
-        "decorations": true,
-        "transparent": false,
-        "resizable": true,
-        "alwaysOnTop": false
       }
     ],
     "security": {
