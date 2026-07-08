@@ -147,10 +147,15 @@ canvas {
 }
 @media (min-width: 101px) {
     /* Expanded window (~360px): show the panel and HIDE the cog so there's no
-       leftover overlay above/below it inside the open panel. */
+       leftover overlay above/below it inside the open panel. The cog reserves a
+       40px column while collapsed; once it's hidden the panel must fill that
+       column too, otherwise the left 40px of the window stays transparent and
+       the wallpaper shows through as a bordered strip beside the panel. */
     .panel-content {
         opacity: 1;
         pointer-events: auto;
+        left: 0;
+        width: 100%;
     }
     .panel-handle {
         display: none;

@@ -629,6 +629,42 @@ function updateSettingsScope(themePath) {
                 label.htmlFor = `custom_setting_${setting.id}`;
                 group.appendChild(label);
 
+                // Dropdown settings: the engine builds an <input> for every other
+                // type, but type:"select" needs a real <select>/<option> tree.
+                if (setting.type === 'select') {
+                    const select = document.createElement('select');
+                    select.id = `custom_setting_${setting.id}`;
+                    (setting.options || []).forEach(opt => {
+                        const o = document.createElement('option');
+                        o.value = opt.value;
+                        o.textContent = opt.label ?? opt.value;
+                        select.appendChild(o);
+                    });
+
+                    const savedVal = config.theme_settings[themePath][setting.id];
+                    select.value = savedVal !== undefined ? savedVal : (setting.default ?? '');
+                    if (savedVal === undefined) {
+                        config.theme_settings[themePath][setting.id] = select.value;
+                    }
+
+                    select.addEventListener('change', (e) => {
+                        const val = e.target.value;
+                        config.theme_settings[themePath][setting.id] = val;
+                        ConfigManager.saveConfig();
+
+                        if (ThemeManager.currentIframe?.contentWindow) {
+                            ThemeManager.currentIframe.contentWindow.postMessage({
+                                type: 'novaframe-settings',
+                                settings: { [setting.id]: val }
+                            }, '*');
+                        }
+                    });
+
+                    group.appendChild(select);
+                    customSettingsSection.appendChild(group);
+                    return; // skip the <input> path below
+                }
+
                 const input = document.createElement('input');
                 input.id = `custom_setting_${setting.id}`;
                 input.type = setting.type || 'text';
@@ -685,94 +721,16 @@ function updateSettingsScope(themePath) {
                     });
                 }
 
+                if (setting.type === 'color') {
+                    input.addEventListener('click', () => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: true }).catch(()=>{}));
+                    input.addEventListener('blur',  () => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: false }).catch(()=>{}));
+                    input.addEventListener('change',() => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: false }).catch(()=>{}));
+                }
+
                 group.appendChild(input);
                 customSettingsSection.appendChild(group);
             });
 
-            // Hardcoded legacy pins logic for Classic Mercator
-            if (ThemeManager.manifestCache[themePath].label === 'Classic Mercator') {
-                // Inputs stack vertically (City on its own row, Lat/Lon paired,
-                // full-width Add button) using the .add-pin-form styles so nothing
-                // ever overflows the panel width horizontally.
-                const legacyHTML = `
-                    <div class="control-group" style="margin-top: 16px;">
-                        <label>Pinned Locations</label>
-                        <div id="pinsList" class="settings-list" style="max-height: 150px; overflow-y: auto; margin-bottom: 8px;"></div>
-                        <div class="add-pin-form">
-                            <input type="text" id="newPinName" placeholder="City">
-                            <div class="row">
-                                <input type="text" id="newPinLat" placeholder="Lat">
-                                <input type="text" id="newPinLon" placeholder="Lon">
-                            </div>
-                            <button id="addPinBtn">Add Location</button>
-                        </div>
-                    </div>
-                `;
-                const tempDiv = document.createElement('div');
-                tempDiv.innerHTML = legacyHTML;
-                customSettingsSection.appendChild(tempDiv.firstElementChild);
-                
-                const pinsList = document.getElementById('pinsList');
-                const addPinBtn = document.getElementById('addPinBtn');
-                
-                const getPins = () => config.theme_settings[themePath].pinned_locations || [];
-                const savePins = (pins) => {
-                    config.theme_settings[themePath].pinned_locations = pins;
-                    ConfigManager.saveConfig();
-                    if (ThemeManager.currentIframe?.contentWindow) {
-                        ThemeManager.currentIframe.contentWindow.postMessage({ type: 'novaframe-settings', settings: { pinned_locations: pins } }, '*');
-                    }
-                };
-
-                const renderPins = () => {
-                    pinsList.innerHTML = '';
-                    getPins().forEach((pin, index) => {
-                        const item = document.createElement('div');
-                        item.className = 'pin-item';
-                        item.innerHTML = `
-                            <div class="pin-info">
-                                <div class="pin-name">${pin.name}</div>
-                                <div class="pin-coords">${pin.lat}, ${pin.lon}</div>
-                            </div>
-                            <button class="delete-btn" data-index="${index}" title="Remove">×</button>
-                        `;
-                        pinsList.appendChild(item);
-                    });
-                    pinsList.querySelectorAll('.delete-btn').forEach(btn => {
-                        btn.addEventListener('click', (e) => {
-                            const idx = parseInt(e.target.dataset.index);
-                            const pins = getPins();
-                            pins.splice(idx, 1);
-                            savePins(pins);
-                            renderPins();
-                        });
-                    });
-                };
-                
-                addPinBtn.addEventListener('click', () => {
-                    const name = document.getElementById('newPinName').value;
-                    const lat = parseFloat(document.getElementById('newPinLat').value);
-                    const lon = parseFloat(document.getElementById('newPinLon').value);
-                    if (name && !isNaN(lat) && !isNaN(lon)) {
-                        const pins = getPins();
-                        pins.push({ name, lat, lon });
-                        savePins(pins);
-                        renderPins();
-                        document.getElementById('newPinName').value = '';
-                        document.getElementById('newPinLat').value = '';
-                        document.getElementById('newPinLon').value = '';
-                    }
-                });
-                
-                if (!config.theme_settings[themePath].pinned_locations) {
-                    config.theme_settings[themePath].pinned_locations = [
-                        { name: "London", lat: 51.5074, lon: -0.1278 },
-                        { name: "New York", lat: 40.7128, lon: -74.0060 },
-                        { name: "Tokyo", lat: 35.6762, lon: 139.6503 }
-                    ];
-                }
-                renderPins();
-            }
         }
     }
 }
@@ -797,10 +755,73 @@ async function initSettingsUI() {
     // Task Manager. Keep the panel locked open while the confirm dialog is up so
     // the hover-poll loop can't collapse the window out from under it.
     const quitBtn = document.getElementById('quitEngineBtn');
+
+    // In-panel replacement for window.confirm(). Native dialogs render centered
+    // in the narrow (~360px) settings window, so their buttons overflow off the
+    // right edge. This overlay is constrained to the window width. Resolves true
+    // on confirm, false on cancel / overlay click / Escape.
+    function confirmInPanel(message) {
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.style.cssText =
+                'position:fixed;inset:0;z-index:100000;display:flex;align-items:center;' +
+                'justify-content:center;padding:12px;background:rgba(0,0,0,0.55);';
+
+            const card = document.createElement('div');
+            card.style.cssText =
+                'box-sizing:border-box;width:100%;max-width:300px;background:#0f141d;' +
+                'border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:18px 16px;' +
+                'color:#e0e8ff;font-size:14px;line-height:1.4;box-shadow:0 8px 30px rgba(0,0,0,0.5);';
+
+            const msg = document.createElement('p');
+            msg.textContent = message;
+            msg.style.cssText = 'margin:0 0 16px 0;';
+
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;gap:8px;';
+
+            const btnStyle =
+                'flex:1;padding:8px 10px;border-radius:6px;font-size:13px;font-weight:600;' +
+                'cursor:pointer;border:1px solid transparent;';
+            const cancel = document.createElement('button');
+            cancel.textContent = 'Cancel';
+            cancel.style.cssText = btnStyle +
+                'background:rgba(255,255,255,0.06);border-color:rgba(255,255,255,0.14);color:#e0e8ff;';
+            const confirm = document.createElement('button');
+            confirm.textContent = 'Close Engine';
+            confirm.style.cssText = btnStyle + 'background:#ef4444;color:#fff;';
+
+            const cleanup = (result) => {
+                document.removeEventListener('keydown', onKey);
+                overlay.remove();
+                resolve(result);
+            };
+            const onKey = (e) => {
+                if (e.key === 'Escape') cleanup(false);
+                if (e.key === 'Enter') cleanup(true);
+            };
+
+            cancel.addEventListener('click', () => cleanup(false));
+            confirm.addEventListener('click', () => cleanup(true));
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(false); });
+            document.addEventListener('keydown', onKey);
+
+            row.appendChild(cancel);
+            row.appendChild(confirm);
+            card.appendChild(msg);
+            card.appendChild(row);
+            overlay.appendChild(card);
+            document.body.appendChild(overlay);
+            confirm.focus();
+        });
+    }
+
     if (quitBtn) {
         quitBtn.addEventListener('click', async () => {
             setPanelLocked(true);
-            const ok = window.confirm('Close Novaframe Engine? Your wallpaper will stop until you reopen it.');
+            // Native confirm() centers in the ~360px settings window, pushing its
+            // OK button off-screen. Use an in-panel modal that fits the width.
+            const ok = await confirmInPanel('Close Novaframe Engine? Your wallpaper will stop until you reopen it.');
             if (!ok) {
                 setPanelLocked(false);
                 return;
@@ -1079,6 +1100,12 @@ function registerEngineApplyListener() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+    document.querySelectorAll('input[type="color"]').forEach((el) => {
+        el.addEventListener('click', () => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: true }).catch(()=>{}));
+        el.addEventListener('blur',  () => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: false }).catch(()=>{}));
+        el.addEventListener('change',() => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: false }).catch(()=>{}));
+    });
+
     // Apply initial scope before settings UI bootstraps so the panel renders correctly.
     applyThemeScope();
 
