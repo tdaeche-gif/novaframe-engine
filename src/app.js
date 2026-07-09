@@ -126,7 +126,7 @@ function initDualWindowSystem() {
             }
         }).catch(err => console.error(err));
     } else if (mode === 'settings') {
-        // CONTROLS MODE: full-window settings panel (300x600 dock, docked right by Rust).
+        // CONTROLS MODE: full-window settings panel (300x650 dock, docked right by Rust).
         document.getElementById('container').style.display = 'none';
         document.body.style.backgroundColor = 'transparent';
         document.documentElement.style.backgroundColor = 'transparent';

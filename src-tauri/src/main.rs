@@ -72,7 +72,7 @@ fn expand_settings_panel(window: tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         let scale_factor = monitor.scale_factor();
         let panel_width: f64 = 360.0; // 320 panel + 40 cog tab
-        let panel_height: f64 = 600.0;
+        let panel_height: f64 = 650.0;
         let monitor_h = monitor.size().height as f64 / scale_factor;
         let monitor_w = monitor.size().width as f64 / scale_factor;
         // Anchor to far-right of monitor
@@ -102,7 +102,7 @@ fn collapse_settings_panel(window: tauri::WebviewWindow) {
         #[cfg(target_os = "windows")]
         let logical_height = 40.0;
         #[cfg(not(target_os = "windows"))]
-        let logical_height = 600.0;
+        let logical_height = 650.0;
         let logical_width = 40.0;
         let monitor_h = monitor.size().height as f64 / scale_factor;
         let logical_x = (monitor.position().x as f64 / scale_factor)
@@ -733,7 +733,7 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
                 };
                 let target_width = if current_width > 150.0 { 300.0 } else { 40.0 };
                 let logical_width = monitor.size().width as f64 / scale_factor;
-                let logical_height = if current_width > 150.0 { 600.0 } else { 40.0 };
+                let logical_height = if current_width > 150.0 { 650.0 } else { 40.0 };
                 let monitor_h = monitor.size().height as f64 / scale_factor;
                 let logical_x =
                     (monitor.position().x as f64 / scale_factor) + logical_width - target_width;
