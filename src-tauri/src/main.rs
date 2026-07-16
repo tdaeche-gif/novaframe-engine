@@ -108,12 +108,50 @@ fn place_settings_window(
     let x = mon_pos.x + mon_size.width as i32 - target_w as i32;
     let y = mon_pos.y + (mon_size.height as i32 - target_h as i32) / 2;
 
+    // Idempotence: skip when the CLIENT (webview) area is already exactly at
+    // the target rect. Poll threads (monitor poll, hover poll) route through
+    // here; redundant set_size/set_position calls trigger repaints on Windows
+    // that show as a periodic flicker.
+    if let (Ok(ip), Ok(is)) = (window.inner_position(), window.inner_size()) {
+        if ip.x == x && ip.y == y && is.width == target_w && is.height == target_h {
+            return;
+        }
+    }
+
     let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
         target_w, target_h,
     )));
     let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
         x, y,
     )));
+
+    // Windows: borderless windows still carry an invisible DWM resize frame,
+    // so the client (webview) area sits a few px INSIDE the outer rect we just
+    // set — the cog rendered clipped off the screen's right edge with dead
+    // transparent space above/below it. Same correction the main window does
+    // in adjust_window_layouts: measure the frame insets, grow the outer rect
+    // by the frame and shift it so the CLIENT lands exactly on the target.
+    #[cfg(target_os = "windows")]
+    if let (Ok(inner), Ok(outer_pos), Ok(outer_size), Ok(inner_size)) = (
+        window.inner_position(),
+        window.outer_position(),
+        window.outer_size(),
+        window.inner_size(),
+    ) {
+        let dx = inner.x - outer_pos.x;
+        let dy = inner.y - outer_pos.y;
+        let frame_w = outer_size.width.saturating_sub(inner_size.width);
+        let frame_h = outer_size.height.saturating_sub(inner_size.height);
+        if dx != 0 || dy != 0 || frame_w != 0 || frame_h != 0 {
+            let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+                target_w + frame_w,
+                target_h + frame_h,
+            )));
+            let _ = window.set_position(tauri::Position::Physical(
+                tauri::PhysicalPosition::new(x - dx, y - dy),
+            ));
+        }
+    }
 }
 
 #[tauri::command]
@@ -149,12 +187,26 @@ fn log_from_js(app: tauri::AppHandle, message: String) {
 #[tauri::command]
 fn quit_engine(app: tauri::AppHandle) {
     println!("[Novaframe] quit_engine invoked — exiting.");
+    // Failsafe: if exit handling wedges (e.g. a WebView2 teardown hang on
+    // Windows), hard-kill the process after 2s so the user never needs
+    // Task Manager to get rid of the engine.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::process::exit(0);
+    });
     app.exit(0);
 }
 
-// Sync (not async) so it runs on the main thread — window creation must.
+// Async on purpose: a SYNC command runs on the main thread, and on Windows
+// building a webview window from the main thread inside a command DEADLOCKS
+// (WebviewWindowBuilder::build blocks on an event the blocked main loop can
+// never process). Symptom: storefront opens as a frozen white window and the
+// whole app hangs — settings dead, quit dead, Task Manager required. Async
+// commands run off the main loop and Tauri dispatches the actual window
+// creation to the main thread itself, which is also why this stays correct
+// on macOS.
 #[tauri::command]
-fn open_storefront_window(app: tauri::AppHandle) -> Result<(), String> {
+async fn open_storefront_window(app: tauri::AppHandle) -> Result<(), String> {
     // Already open (or a previous session left it around): just focus it.
     if let Some(window) = app.get_webview_window("storefront") {
         window.show().map_err(|e| e.to_string())?;
@@ -692,36 +744,47 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
             {
                 let mon_size = *monitor.size();
                 let mon_pos = *monitor.position();
-                let _ = window.set_size(tauri::Size::Physical(mon_size));
-                let _ = window.set_position(tauri::Position::Physical(mon_pos));
 
                 // Borderless Windows windows still carry an invisible DWM resize
                 // frame, so the client (webview) area sits ~8px INSIDE the outer
-                // rect. outer_pos=(0,0) therefore renders the wallpaper starting
-                // at x≈8 — an 8px desktop gap on the left + everything shifted
-                // right. Measure the client inset (inner vs outer position) and
-                // shift the outer rect out by that much so the CLIENT top-left
-                // lands exactly on the monitor origin. Also grow the size by the
-                // full frame so the client covers the whole monitor.
-                if let (Ok(inner), Ok(outer_pos), Ok(outer_size), Ok(inner_size)) = (
+                // rect. Measure the current frame insets (they're constant across
+                // resizes) and compute the ONE outer rect whose CLIENT covers the
+                // monitor exactly. Previously this set the raw monitor rect first
+                // and then re-set the corrected rect — a visible double-resize —
+                // and the monitor-poll safety net re-ran it every pass with no
+                // "already correct" check, producing a flicker every few seconds.
+                let (dx, dy, frame_w, frame_h) = match (
                     window.inner_position(),
                     window.outer_position(),
                     window.outer_size(),
                     window.inner_size(),
                 ) {
-                    let dx = inner.x - outer_pos.x; // left frame inset
-                    let dy = inner.y - outer_pos.y; // top frame inset
-                    let frame_w = outer_size.width.saturating_sub(inner_size.width);
-                    let frame_h = outer_size.height.saturating_sub(inner_size.height);
-                    if dx != 0 || dy != 0 || frame_w != 0 || frame_h != 0 {
-                        let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-                            mon_size.width + frame_w,
-                            mon_size.height + frame_h,
-                        )));
-                        let _ = window.set_position(tauri::Position::Physical(
-                            tauri::PhysicalPosition::new(mon_pos.x - dx, mon_pos.y - dy),
-                        ));
+                    (Ok(inner), Ok(outer_pos), Ok(outer_size), Ok(inner_size)) => (
+                        inner.x - outer_pos.x,
+                        inner.y - outer_pos.y,
+                        outer_size.width.saturating_sub(inner_size.width),
+                        outer_size.height.saturating_sub(inner_size.height),
+                    ),
+                    _ => (0, 0, 0, 0),
+                };
+                let want_w = mon_size.width + frame_w;
+                let want_h = mon_size.height + frame_h;
+                let want_x = mon_pos.x - dx;
+                let want_y = mon_pos.y - dy;
+
+                let already_placed = match (window.outer_position(), window.outer_size()) {
+                    (Ok(p), Ok(s)) => {
+                        p.x == want_x && p.y == want_y && s.width == want_w && s.height == want_h
                     }
+                    _ => false,
+                };
+                if !already_placed {
+                    let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+                        want_w, want_h,
+                    )));
+                    let _ = window.set_position(tauri::Position::Physical(
+                        tauri::PhysicalPosition::new(want_x, want_y),
+                    ));
                     dlog(app, &format!(
                         "[layout] frame inset dx={} dy={} frame_w={} frame_h={} -> client aligned to monitor origin",
                         dx, dy, frame_w, frame_h
@@ -809,7 +872,7 @@ fn build_tray(app: &tauri::AppHandle) {
                     "Pause Wallpaper"
                 });
             }
-            "tray_quit" => app.exit(0),
+            "tray_quit" => quit_engine(app.clone()),
             _ => {}
         });
 
