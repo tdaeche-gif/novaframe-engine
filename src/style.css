@@ -48,7 +48,7 @@ canvas {
    - The panel is a flex row anchored to the right of the window.  The
      cog (.panel-handle) is ALWAYS visible at the left edge — it is the
      persistent affordance.
-   - .panel-content sits to the right of the cog. When the window is 40px
+   - .panel-content sits to the right of the cog. When the window is 30px
      wide (Rust's collapsed state on hover-out), the content is clipped
      off-screen by the window's own width — only the cog is visible.
    - When Rust expands the window to 275px on hover, the content becomes
@@ -139,7 +139,7 @@ canvas {
 }
 
 @media (max-width: 100px) {
-    /* Collapsed window (~40px): cog is the only visible affordance. */
+    /* Collapsed window (~30px): cog is the only visible affordance. */
     .panel-content {
         opacity: 0;
         pointer-events: none;
@@ -244,14 +244,21 @@ canvas {
     margin-top: 16px;
 }
 
-/* Toggle switch row (Launch on startup, etc.) */
-.toggle-row {
+/* Toggle switch row (Launch on startup, etc.)
+   Selector is scoped through .control-group so it out-specifies the generic
+   `.control-group label` field-label rule (0,0,1,1) — otherwise that rule wins
+   and forces the toggle row to display:block / 12px / blue / 10px-margin,
+   which knocked the track off-center against the text. */
+.control-group label.toggle-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     cursor: pointer;
     margin-bottom: 0;
     font-size: 14px;
+    font-weight: 400;
+    letter-spacing: normal;
+    color: #e0e8ff;
     gap: 12px;
 }
 .toggle-row input[type="checkbox"] {
@@ -261,6 +268,10 @@ canvas {
     height: 0;
 }
 .toggle-track {
+    /* Must be inline-block/block — a bare <span> is display:inline, which
+       ignores width/height, collapsing the pill to zero size (the track +
+       thumb were invisible). */
+    display: inline-block;
     flex-shrink: 0;
     position: relative;
     width: 40px;

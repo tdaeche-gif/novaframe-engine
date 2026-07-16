@@ -20,6 +20,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // as hovered unconditionally so it can't collapse mid-selection.
 static SETTINGS_PANEL_LOCKED: AtomicBool = AtomicBool::new(false);
 
+// Collapsed settings-window dimensions, sized to the cog itself so the
+// hover-to-expand target is the visible icon only — not the full-height column
+// (height) and not a strip of dead space to its right (width). The cog
+// (.panel-handle) is 30px wide, anchored to the window's left edge; the window
+// is pinned flush to the monitor's right edge, so matching the width to the cog
+// puts the icon flush against the screen edge with no floating gap.
+const COLLAPSED_WIDTH: f64 = 30.0;
+const COLLAPSED_HEIGHT: f64 = 48.0;
+
 // ── Wallpaper pause coordination ────────────────────────────────────────────
 // The wallpaper render is paused (render loop suspended in the theme iframe)
 // when ANY of these are true. Each input sets its own flag, then calls
@@ -67,57 +76,64 @@ fn set_settings_panel_locked(locked: bool) {
     SETTINGS_PANEL_LOCKED.store(locked, Ordering::Relaxed);
 }
 
+/// Anchor the settings window flush to the monitor's right edge, vertically
+/// centered, at the given LOGICAL size. Does all math in PHYSICAL pixels
+/// (monitor.position()/size() are already physical) and only converts to
+/// logical at the point Tauri requires it, rounding to the nearest physical
+/// pixel throughout.
+///
+/// Why: the previous version divided monitor position/size by scale_factor
+/// into logical f64s, added/subtracted logical widths, and handed the result
+/// to set_position(Logical). Every one of those divisions can produce a
+/// fractional logical value (e.g. a secondary monitor whose physical origin
+/// isn't a clean multiple of scale_factor); Tauri then multiplies back by
+/// scale_factor to get physical pixels, and the rounding at THAT point can
+/// land the window's right edge a pixel or two short of the true screen edge
+/// — reported as the cog "floating" a few px off the right side on macOS
+/// Retina displays. Computing entirely in physical pixels and rounding once,
+/// right before the set_size/set_position calls, removes that drift.
+fn place_settings_window(
+    window: &tauri::WebviewWindow,
+    monitor: &tauri::window::Monitor,
+    logical_width: f64,
+    logical_height: f64,
+) {
+    let scale_factor = monitor.scale_factor();
+    let target_w = (logical_width * scale_factor).round() as u32;
+    let target_h = (logical_height * scale_factor).round() as u32;
+
+    let mon_pos = monitor.position();
+    let mon_size = monitor.size();
+
+    let x = mon_pos.x + mon_size.width as i32 - target_w as i32;
+    let y = mon_pos.y + (mon_size.height as i32 - target_h as i32) / 2;
+
+    let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+        target_w, target_h,
+    )));
+    let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+        x, y,
+    )));
+}
+
 #[tauri::command]
 fn expand_settings_panel(window: tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor() {
-        let scale_factor = monitor.scale_factor();
-        let panel_width: f64 = 360.0; // 320 panel + 40 cog tab
-        let panel_height: f64 = 650.0;
-        let monitor_h = monitor.size().height as f64 / scale_factor;
-        let monitor_w = monitor.size().width as f64 / scale_factor;
-        // Anchor to far-right of monitor
-        let logical_x = (monitor.position().x as f64 / scale_factor) + (monitor_w - panel_width);
-        let logical_y = (monitor.position().y as f64 / scale_factor)
-            + (monitor_h - panel_height) / 2.0;
-
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-            panel_width,
-            panel_height,
-        )));
-        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
-            logical_x, logical_y,
-        )));
+        place_settings_window(&window, &monitor, 360.0, 650.0); // 320 panel + 40 cog tab
     }
 }
 
 #[tauri::command]
 fn collapse_settings_panel(window: tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor() {
-        let scale_factor = monitor.scale_factor();
-        // Windows: shrink the collapsed window to exactly the cog height so the
+        // Collapsed window is sized to just the cog on every platform so the
+        // hover-to-expand target is ONLY the visible settings icon — not the
+        // full-height column above/below it. (Windows also needs this so the
         // WebView2/DWM layered-window outline can't draw a faint 600px-tall
-        // border down the right edge. macOS renders the transparent column
-        // cleanly, and a full-height window there gives a much larger
-        // hover-to-expand target — so keep 600 on non-Windows.
-        #[cfg(target_os = "windows")]
-        let logical_height = 40.0;
-        #[cfg(not(target_os = "windows"))]
-        let logical_height = 650.0;
-        let logical_width = 40.0;
-        let monitor_h = monitor.size().height as f64 / scale_factor;
-        let logical_x = (monitor.position().x as f64 / scale_factor)
-            + (monitor.size().width as f64 / scale_factor)
-            - logical_width;
-        let logical_y =
-            (monitor.position().y as f64 / scale_factor) + (monitor_h - logical_height) / 2.0;
-
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-            logical_width,
-            logical_height,
-        )));
-        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
-            logical_x, logical_y,
-        )));
+        // border down the right edge.) The cog is vertically centered in both
+        // the collapsed and expanded windows, so it stays at the same screen Y
+        // across the transition.
+        place_settings_window(&window, &monitor, COLLAPSED_WIDTH, COLLAPSED_HEIGHT);
     }
 }
 
@@ -731,22 +747,13 @@ fn adjust_window_layouts(app: &tauri::AppHandle) {
                 } else {
                     25.0
                 };
-                let target_width = if current_width > 150.0 { 300.0 } else { 40.0 };
-                let logical_width = monitor.size().width as f64 / scale_factor;
-                let logical_height = if current_width > 150.0 { 650.0 } else { 40.0 };
-                let monitor_h = monitor.size().height as f64 / scale_factor;
-                let logical_x =
-                    (monitor.position().x as f64 / scale_factor) + logical_width - target_width;
-                let logical_y = (monitor.position().y as f64 / scale_factor)
-                    + (monitor_h - logical_height) / 2.0;
-
-                let _ = settings_window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-                    target_width,
-                    logical_height,
-                )));
-                let _ = settings_window.set_position(tauri::Position::Logical(
-                    tauri::LogicalPosition::new(logical_x, logical_y),
-                ));
+                // Mirror expand_settings_panel / collapse_settings_panel exactly
+                // (same helper, same physical-pixel math — see
+                // place_settings_window for why logical math was dropped).
+                let expanded = current_width > 150.0;
+                let target_width = if expanded { 360.0 } else { COLLAPSED_WIDTH };
+                let target_height = if expanded { 650.0 } else { COLLAPSED_HEIGHT };
+                place_settings_window(&settings_window, &monitor, target_width, target_height);
             }
         }
     }

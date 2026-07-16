@@ -67,6 +67,35 @@ function setPanelLocked(locked) {
     }
 }
 
+// One delegated lock for EVERY control whose native popup can extend beyond
+// the panel window (selects, color pickers) — including controls created
+// dynamically for theme custom_settings, which per-element listeners missed.
+// Lock when the popup could open; unlock only once a value is committed
+// (change) or focus verifiably stays inside the page (the macOS color panel
+// is a separate OS window, so its opening fires blur/focusout — unlocking
+// there would collapse the panel under the open picker).
+const POPUP_CONTROLS = 'select, input[type="color"]';
+function initPanelLockDelegation() {
+    const matches = (t) => t instanceof Element && t.closest(POPUP_CONTROLS);
+    document.addEventListener('mousedown', (e) => { if (matches(e.target)) setPanelLocked(true); }, true);
+    document.addEventListener('focusin',  (e) => { if (matches(e.target)) setPanelLocked(true); });
+    document.addEventListener('change',   (e) => { if (matches(e.target)) setPanelLocked(false); });
+    document.addEventListener('focusout', (e) => {
+        if (!matches(e.target)) return;
+        // Defer one tick: if the document still has focus, the popup closed
+        // (or never opened) and focus merely moved within the panel — safe to
+        // unlock. If an OS-level picker window took focus, keep the lock.
+        setTimeout(() => { if (document.hasFocus()) setPanelLocked(false); }, 0);
+    });
+    // Focus returning to the webview with no popup control active means any
+    // OS picker window closed without committing (e.g. color panel dismissed
+    // with no change event) — release the lock so the panel can collapse.
+    window.addEventListener('focus', () => {
+        const el = document.activeElement;
+        if (!(el instanceof Element) || !el.closest(POPUP_CONTROLS)) setPanelLocked(false);
+    });
+}
+
 // Check and provision default theme inside system AppData on startup
 async function verifyAndProvisionAppData() {
     const tauriFs = window.__TAURI_PLUGIN_FS__ || (window.__TAURI__ && window.__TAURI__.fs);
@@ -235,7 +264,12 @@ const ThemeManager = {
         // Idempotency guard: skip the full render path if the theme is already
         // active (manifest + path match). Prevents double-mounts when an echo
         // event re-enters this function before the first call has finished.
-        if (themePath === this.currentThemePath && manifest.theme_id === this.currentManifest?.theme_id) {
+        // Note: requires an already-mounted iframe — a matching path with no
+        // mount (e.g. currentThemePath pre-set by a config writer) must still
+        // render. forceReload bypasses it entirely (refresh button).
+        if (!forceReload && this.currentIframe
+            && themePath === this.currentThemePath
+            && manifest.theme_id === this.currentManifest?.theme_id) {
             return;
         }
 
@@ -466,7 +500,8 @@ const ConfigManager = {
                     const normLatest = latestTheme || null;
                     const normCurrent = ThemeManager.currentThemePath || null;
                     if (normLatest !== normCurrent) {
-                        ThemeManager.currentThemePath = normLatest;
+                        // Don't pre-set currentThemePath here — loadTheme's
+                        // idempotency guard would then skip the actual render.
                         ThemeManager.loadTheme(normLatest);
                     }
                 }, 1000);
@@ -721,11 +756,8 @@ function updateSettingsScope(themePath) {
                     });
                 }
 
-                if (setting.type === 'color') {
-                    input.addEventListener('click', () => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: true }).catch(()=>{}));
-                    input.addEventListener('blur',  () => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: false }).catch(()=>{}));
-                    input.addEventListener('change',() => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: false }).catch(()=>{}));
-                }
+                // Panel locking for selects/color pickers is handled by the
+                // delegated listeners in initPanelLockDelegation().
 
                 group.appendChild(input);
                 customSettingsSection.appendChild(group);
@@ -752,80 +784,19 @@ async function initSettingsUI() {
     updateSettingsScope(activeTheme);
 
     // 4. Wire the exit button — fully quits the engine so the user never needs
-    // Task Manager. Keep the panel locked open while the confirm dialog is up so
-    // the hover-poll loop can't collapse the window out from under it.
+    // Task Manager. The in-panel confirm keeps the panel locked open while up
+    // (see modalInPanel) so the hover-poll loop can't collapse it mid-dialog.
     const quitBtn = document.getElementById('quitEngineBtn');
-
-    // In-panel replacement for window.confirm(). Native dialogs render centered
-    // in the narrow (~360px) settings window, so their buttons overflow off the
-    // right edge. This overlay is constrained to the window width. Resolves true
-    // on confirm, false on cancel / overlay click / Escape.
-    function confirmInPanel(message) {
-        return new Promise((resolve) => {
-            const overlay = document.createElement('div');
-            overlay.style.cssText =
-                'position:fixed;inset:0;z-index:100000;display:flex;align-items:center;' +
-                'justify-content:center;padding:12px;background:rgba(0,0,0,0.55);';
-
-            const card = document.createElement('div');
-            card.style.cssText =
-                'box-sizing:border-box;width:100%;max-width:300px;background:#0f141d;' +
-                'border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:18px 16px;' +
-                'color:#e0e8ff;font-size:14px;line-height:1.4;box-shadow:0 8px 30px rgba(0,0,0,0.5);';
-
-            const msg = document.createElement('p');
-            msg.textContent = message;
-            msg.style.cssText = 'margin:0 0 16px 0;';
-
-            const row = document.createElement('div');
-            row.style.cssText = 'display:flex;gap:8px;';
-
-            const btnStyle =
-                'flex:1;padding:8px 10px;border-radius:6px;font-size:13px;font-weight:600;' +
-                'cursor:pointer;border:1px solid transparent;';
-            const cancel = document.createElement('button');
-            cancel.textContent = 'Cancel';
-            cancel.style.cssText = btnStyle +
-                'background:rgba(255,255,255,0.06);border-color:rgba(255,255,255,0.14);color:#e0e8ff;';
-            const confirm = document.createElement('button');
-            confirm.textContent = 'Close Engine';
-            confirm.style.cssText = btnStyle + 'background:#ef4444;color:#fff;';
-
-            const cleanup = (result) => {
-                document.removeEventListener('keydown', onKey);
-                overlay.remove();
-                resolve(result);
-            };
-            const onKey = (e) => {
-                if (e.key === 'Escape') cleanup(false);
-                if (e.key === 'Enter') cleanup(true);
-            };
-
-            cancel.addEventListener('click', () => cleanup(false));
-            confirm.addEventListener('click', () => cleanup(true));
-            overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(false); });
-            document.addEventListener('keydown', onKey);
-
-            row.appendChild(cancel);
-            row.appendChild(confirm);
-            card.appendChild(msg);
-            card.appendChild(row);
-            overlay.appendChild(card);
-            document.body.appendChild(overlay);
-            confirm.focus();
-        });
-    }
 
     if (quitBtn) {
         quitBtn.addEventListener('click', async () => {
-            setPanelLocked(true);
             // Native confirm() centers in the ~360px settings window, pushing its
             // OK button off-screen. Use an in-panel modal that fits the width.
-            const ok = await confirmInPanel('Close Novaframe Engine? Your wallpaper will stop until you reopen it.');
-            if (!ok) {
-                setPanelLocked(false);
-                return;
-            }
+            const ok = await confirmInPanel(
+                'Close Novaframe Engine? Your wallpaper will stop until you reopen it.',
+                'Close Engine'
+            );
+            if (!ok) return;
             try {
                 await window.__TAURI__.core.invoke('quit_engine');
             } catch (err) {
@@ -876,45 +847,49 @@ async function scanThemes() {
         const entries = await tauriFs.readDir(themesDir);
         console.log("[Novaframe] Found entries:", entries);
         
-        for (const entry of entries) {
+        // Read all manifests in parallel — sequential awaits made panel-open
+        // latency scale linearly with installed theme count.
+        const themeDirs = entries.filter(entry => {
             const isDir = entry.isDirectory === true || Array.isArray(entry.children);
             // Skip dotfolders — e.g. the transient `.staging-<id>` dir the Rust
             // installer uses mid-install. They aren't user themes.
-            if (isDir && entry.name && !entry.name.startsWith('.')) {
-                const themePath = `${themesDir}/${entry.name}`;
-                let label = entry.name;
-                let mode = 'unknown';
-                let custom_settings = null;
-                let theme_id = null;
-                let version = null;
-                try {
-                    const { manifest } = await ThemeManager.readManifest(themePath);
-                    // Forward-compat: a theme built for a newer manifest schema
-                    // is kept out of the dropdown so the engine never renders a
-                    // format it doesn't understand.
-                    if (manifestNeedsNewerEngine(manifest)) {
-                        console.warn(`[Novaframe] Skipping "${manifest.name || entry.name}": manifest_version ${manifest.manifest_version} needs a newer engine (supports ${ENGINE_MANIFEST_VERSION}).`);
-                        continue;
-                    }
-                    if (manifest.name) label = `${manifest.name}`;
-                    mode = manifest.render_mode || 'external-html';
-                    if (manifest.custom_settings) custom_settings = manifest.custom_settings;
+            return isDir && entry.name && !entry.name.startsWith('.');
+        });
+        const scanned = await Promise.all(themeDirs.map(async (entry) => {
+            const themePath = `${themesDir}/${entry.name}`;
+            try {
+                const { manifest } = await ThemeManager.readManifest(themePath);
+                // Forward-compat: a theme built for a newer manifest schema
+                // is kept out of the dropdown so the engine never renders a
+                // format it doesn't understand.
+                if (manifestNeedsNewerEngine(manifest)) {
+                    console.warn(`[Novaframe] Skipping "${manifest.name || entry.name}": manifest_version ${manifest.manifest_version} needs a newer engine (supports ${ENGINE_MANIFEST_VERSION}).`);
+                    return null;
+                }
+                return {
+                    themePath,
+                    label: manifest.name || entry.name,
+                    mode: manifest.render_mode || 'external-html',
+                    custom_settings: manifest.custom_settings || null,
                     // Used by checkThemeContentUpdates: theme_id is the
                     // marketplace wallpaper UUID, version the installed build.
-                    theme_id = manifest.theme_id || null;
-                    version = manifest.version || null;
-                } catch (_) {
-                    continue;
-                }
-
-                ThemeManager.manifestCache[themePath] = { label, mode, custom_settings, theme_id, version };
-
-                const option = document.createElement('option');
-                option.value = themePath;
-                option.dataset.renderMode = mode;
-                option.textContent = `${label}`;
-                selector.appendChild(option);
+                    theme_id: manifest.theme_id || null,
+                    version: manifest.version || null
+                };
+            } catch (_) {
+                return null;
             }
+        }));
+        for (const t of scanned) {
+            if (!t) continue;
+            const { themePath, label, mode, custom_settings, theme_id, version } = t;
+            ThemeManager.manifestCache[themePath] = { label, mode, custom_settings, theme_id, version };
+
+            const option = document.createElement('option');
+            option.value = themePath;
+            option.dataset.renderMode = mode;
+            option.textContent = label;
+            selector.appendChild(option);
         }
 
         const activeTheme = await ConfigManager.getTheme();
@@ -944,13 +919,36 @@ async function scanThemes() {
                 }
             }
             await ConfigManager.setTheme(targetTheme);
-            ThemeManager.loadTheme(targetTheme);
+            // Only the main window mounts the wallpaper iframe. Loading here in
+            // the settings window would render a hidden copy of the theme
+            // (container is display:none but the iframe still runs its WebGL
+            // loop), doubling GPU/CPU cost. The main window picks the change up
+            // via its store poll / theme-changed event.
+            const inSettingsWindow = window.__TAURI__
+                && window.location.search.includes('mode=settings');
+            if (!inSettingsWindow) {
+                ThemeManager.loadTheme(targetTheme);
+            }
         }
         
     } catch (e) {
         console.error("[Novaframe] scanThemes failed:", e);
     }
     
+    // Reload button: remount the active wallpaper in the main window. Useful
+    // when a theme's WebGL context wedges. Emits to all windows; only the main
+    // window listens (theme-reload handler in DOMContentLoaded).
+    const refreshBtn = document.getElementById('refreshThemeBtn');
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', async () => {
+            if (window.__TAURI__?.event) {
+                try { await window.__TAURI__.event.emit('theme-reload'); } catch (_) {}
+            } else if (ThemeManager.currentThemePath) {
+                ThemeManager.loadTheme(ThemeManager.currentThemePath, true);
+            }
+        });
+    }
+
     const openStoreBtn = document.getElementById('openStoreBtn');
     if (openStoreBtn) {
         openStoreBtn.addEventListener('click', async () => {
@@ -969,21 +967,114 @@ async function scanThemes() {
     // deep link either unhandled (blank dropdown) or handled by a stale/duplicate
     // listener racing a concurrent install.
 
-    // Lock the panel open while the native dropdown popup is open (mousedown
-    // covers pointer-opened popups, focus covers keyboard-opened ones). Unlock
-    // on change (an option was picked) or blur (closed without picking, e.g.
-    // Escape or clicking away) — whichever fires first closes the popup.
-    selector.addEventListener('mousedown', () => setPanelLocked(true));
-    selector.addEventListener('focus', () => setPanelLocked(true));
-    selector.addEventListener('blur', () => setPanelLocked(false));
-
+    // Panel locking while the native dropdown popup is open is handled by
+    // the delegated listeners in initPanelLockDelegation().
     selector.addEventListener('change', async (e) => {
-        setPanelLocked(false);
         const selected = e.target.value;
         // Persist + broadcast. The broadcast fans out to all windows; the
         // settings-window listener will update its own dropdown highlight +
         // scope when it echoes back. The main-window listener will re-render.
         await ConfigManager.setTheme(selected);
+    });
+}
+
+// Width-constrained replacement for window.alert()/confirm(). Native dialogs
+// render centered in the ~360px settings window, overflowing their buttons off
+// the right edge — this overlay is constrained to the window width. Module
+// scope so the deep-link listener (which runs outside initSettingsUI) can use
+// it on its error paths, exactly when the user needs to read the message.
+// Keeps the panel locked open while up so the hover-poll loop can't collapse
+// the window out from under it.
+//
+//   message  – body text
+//   buttons  – [{ label, value, variant, isDefault, isCancel }]
+//              variant: 'primary' (green) | 'danger' (red) | 'neutral' (grey)
+//              isDefault → focused + triggered by Enter
+//              isCancel  → triggered by Escape + overlay click
+// Resolves with the chosen button's `value`.
+const MODAL_BTN_VARIANTS = {
+    primary: 'background:#10b981;color:#022c22;',
+    danger:  'background:#ef4444;color:#fff;',
+    neutral: 'background:rgba(255,255,255,0.06);border-color:rgba(255,255,255,0.14);color:#e0e8ff;',
+};
+function modalInPanel({ message, buttons }) {
+    return new Promise((resolve) => {
+        setPanelLocked(true);
+
+        const overlay = document.createElement('div');
+        overlay.style.cssText =
+            'position:fixed;inset:0;z-index:100000;display:flex;align-items:center;' +
+            'justify-content:center;padding:12px;background:rgba(0,0,0,0.55);';
+
+        const card = document.createElement('div');
+        card.style.cssText =
+            'box-sizing:border-box;width:100%;max-width:300px;background:#0f141d;' +
+            'border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:18px 16px;' +
+            'color:#e0e8ff;font-size:14px;line-height:1.4;box-shadow:0 8px 30px rgba(0,0,0,0.5);';
+
+        const msg = document.createElement('p');
+        msg.textContent = message;
+        msg.style.cssText = 'margin:0 0 16px 0;';
+
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:8px;';
+
+        const cleanup = (value) => {
+            document.removeEventListener('keydown', onKey);
+            overlay.remove();
+            setPanelLocked(false);
+            resolve(value);
+        };
+
+        const defaultBtn = buttons.find(b => b.isDefault);
+        const cancelBtn = buttons.find(b => b.isCancel);
+        const onKey = (e) => {
+            if (e.key === 'Enter' && defaultBtn) cleanup(defaultBtn.value);
+            if (e.key === 'Escape' && cancelBtn) cleanup(cancelBtn.value);
+        };
+
+        let toFocus = null;
+        for (const spec of buttons) {
+            const btn = document.createElement('button');
+            btn.textContent = spec.label;
+            btn.style.cssText =
+                'flex:1;padding:8px 10px;border-radius:6px;font-size:13px;font-weight:600;' +
+                'cursor:pointer;border:1px solid transparent;' +
+                (MODAL_BTN_VARIANTS[spec.variant] || MODAL_BTN_VARIANTS.neutral);
+            btn.addEventListener('click', () => cleanup(spec.value));
+            if (spec.isDefault) toFocus = btn;
+            row.appendChild(btn);
+        }
+
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay && cancelBtn) cleanup(cancelBtn.value);
+        });
+        document.addEventListener('keydown', onKey);
+
+        card.appendChild(msg);
+        card.appendChild(row);
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+        (toFocus || row.firstChild)?.focus();
+    });
+}
+
+// Single-button acknowledgement. Resolves when dismissed.
+function alertInPanel(message) {
+    return modalInPanel({
+        message,
+        buttons: [{ label: 'OK', value: undefined, variant: 'primary', isDefault: true, isCancel: true }],
+    });
+}
+
+// Two-button confirm. Resolves true on confirm, false on cancel/Escape/overlay.
+function confirmInPanel(message, confirmLabel = 'Confirm', variant = 'danger') {
+    return modalInPanel({
+        message,
+        buttons: [
+            { label: 'Cancel', value: false, variant: 'neutral', isCancel: true },
+            { label: confirmLabel, value: true, variant, isDefault: true },
+        ],
     });
 }
 
@@ -1072,7 +1163,7 @@ function registerEngineApplyListener() {
                     console.log(TAG, stamp, `✅ Rust install returned dir=${installedThemeId}`);
                 } catch (rustErr) {
                     console.error(TAG, stamp, '❌ Rust download_and_install_theme rejected:', rustErr);
-                    alert('Engine install command rejected: ' + (rustErr?.message ?? rustErr));
+                    await alertInPanel('Engine install command rejected: ' + (rustErr?.message ?? rustErr));
                     return;
                 }
 
@@ -1089,22 +1180,20 @@ function registerEngineApplyListener() {
             } else {
                 console.error(TAG, stamp, 'verify-token returned !ok || !success:', data);
                 console.error("Token verification failed:", data.error);
-                alert(friendlyApiError(data));
+                await alertInPanel(friendlyApiError(data));
             }
         } catch (err) {
             console.error(TAG, stamp, '❌ exception in listener:', err);
             console.error("Error verifying token:", err);
-            alert("Error verifying license token.");
+            await alertInPanel("Error verifying license token.");
         }
     });
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-    document.querySelectorAll('input[type="color"]').forEach((el) => {
-        el.addEventListener('click', () => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: true }).catch(()=>{}));
-        el.addEventListener('blur',  () => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: false }).catch(()=>{}));
-        el.addEventListener('change',() => window.__TAURI__.core.invoke('set_settings_panel_locked', { locked: false }).catch(()=>{}));
-    });
+    // Delegated panel locking for selects + color pickers (covers dynamically
+    // created custom-setting controls too).
+    initPanelLockDelegation();
 
     // Apply initial scope before settings UI bootstraps so the panel renders correctly.
     applyThemeScope();
@@ -1175,6 +1264,15 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             });
 
+            // Refresh button in the settings panel: hard-remount the active
+            // theme's iframe (main window only — settings window has no mount).
+            window.__TAURI__.event.listen('theme-reload', () => {
+                const isMainWindow = window.location.search.includes('mode=main');
+                if (isMainWindow && ThemeManager.currentThemePath) {
+                    ThemeManager.loadTheme(ThemeManager.currentThemePath, true);
+                }
+            });
+
             window.__TAURI__.event.listen('theme-installed', async (event) => {
                 const absoluteThemePath = event.payload;
                 console.log("[Novaframe] Received theme-installed event with path:", absoluteThemePath);
@@ -1193,8 +1291,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             // macOS Sleep Failsafe (Bulletproof)
             // When the OS goes to sleep, the WebGL context in the iframe is often lost or frozen.
             // A delta-time interval detects if the CPU actually slept (e.g. >5 seconds passed between 1s intervals).
+            // Main window only — the settings window never mounts an iframe,
+            // so its copy of this timer was pure waste.
             let lastTick = Date.now();
-            setInterval(() => {
+            if (!isSettingsWindow) setInterval(() => {
                 const now = Date.now();
                 if (now - lastTick > 5000) {
                     console.log("Wake from sleep detected. Reloading iframe to restore WebGL context.");
@@ -1375,10 +1475,15 @@ async function checkThemeContentUpdates() {
             notice.style.display = 'none';
             return;
         }
+        // Build with DOM nodes, not innerHTML — titles come from the server and
+        // must never be interpreted as markup inside the settings webview.
         const names = updates.map(u => u.title || u.id).join(', ');
-        notice.innerHTML =
-            `<strong>Wallpaper update available:</strong> ${names}. ` +
-            `Open the Marketplace, go to <strong>My Vault</strong> and hit Apply to refresh.`;
+        notice.textContent = '';
+        const strong = document.createElement('strong');
+        strong.textContent = 'Wallpaper update available:';
+        notice.append(strong, ` ${names}. Open the Marketplace, go to `,
+            Object.assign(document.createElement('strong'), { textContent: 'My Vault' }),
+            ' and hit Apply to refresh.');
         notice.style.display = 'block';
     } catch (err) {
         console.log('[ThemeUpdates] check failed (offline?):', err);
