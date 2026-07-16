@@ -1023,6 +1023,8 @@ fn main() {
             let handle_clone = handle.clone();
             std::thread::spawn(move || {
                 let mut last_monitors_hash = String::new();
+                #[cfg_attr(not(target_os = "windows"), allow(unused_mut, unused_variables))]
+                let mut last_drift_attempt = String::new();
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(2));
                     if let Ok(monitors) = handle_clone.available_monitors() {
@@ -1032,6 +1034,8 @@ fn main() {
                         }
                         if hash != last_monitors_hash {
                             last_monitors_hash = hash;
+                            #[cfg(target_os = "windows")]
+                            last_drift_attempt.clear();
                             adjust_window_layouts(&handle_clone);
                         }
                     }
@@ -1040,6 +1044,14 @@ fn main() {
                     // if the main window has drifted from its monitor's size (the
                     // startup reparent race can leave it at the config 1920x1080).
                     // Without this a static non-1080p display would stay wrong.
+                    //
+                    // Convergence guard: if a correction was already attempted and
+                    // the size STILL doesn't match (Windows refused/clamped the
+                    // resize — e.g. a WorkerW/DPI quirk on that machine), stop
+                    // retrying until the monitor set changes. Re-firing the same
+                    // failed correction every poll re-composites the wallpaper and
+                    // the translucent settings panel over it — visible as a
+                    // periodic flicker/"refresh" every few seconds.
                     #[cfg(target_os = "windows")]
                     if let Some(w) = handle_clone.get_webview_window("main") {
                         if let (Ok(sz), Ok(Some(mon))) = (w.inner_size(), w.current_monitor()) {
@@ -1047,7 +1059,19 @@ fn main() {
                             let dw = (sz.width as i64 - ms.width as i64).abs();
                             let dh = (sz.height as i64 - ms.height as i64).abs();
                             if dw > 2 || dh > 2 {
-                                adjust_window_layouts(&handle_clone);
+                                let attempt_key = format!(
+                                    "{}x{}@{:?}->{}x{}",
+                                    sz.width, sz.height, mon.position(), ms.width, ms.height
+                                );
+                                if attempt_key != last_drift_attempt {
+                                    adjust_window_layouts(&handle_clone);
+                                    dlog(&handle_clone, &format!(
+                                        "[layout] drift correction attempted: {}", attempt_key
+                                    ));
+                                    last_drift_attempt = attempt_key;
+                                }
+                            } else {
+                                last_drift_attempt.clear();
                             }
                         }
                     }
