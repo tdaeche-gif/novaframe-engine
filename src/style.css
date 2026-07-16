@@ -68,10 +68,13 @@ canvas {
 .panel-handle {
     position: absolute;
     left: 0;
-    top: 50%;
-    transform: translateY(-50%);
+    /* Fill the collapsed window's full height (30x48). A shorter centered
+       tab leaves transparent strips above/below it that Windows renders as
+       a faint box (layered windows aren't truly transparent there, unlike
+       macOS compositing). Cog stays centered via flex. */
+    top: 0;
+    height: 100%;
     width: 30px;
-    height: 30px;
     margin-top: 0;
     /* Square (no radius) so the wallpaper can't bleed through rounded corners,
        and opaque enough (no backdrop-filter) that nothing behind shows through.
@@ -111,8 +114,12 @@ canvas {
     top: 0;
     width: 320px;
     height: 100%;
-    padding: 16px 16px;
+    padding: 12px 16px;
     box-sizing: border-box;
+    /* Thin unobtrusive scrollbar: the Windows default is wide enough to eat
+       the right padding and leave the buttons flush with the screen edge. */
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
     background: rgba(10, 15, 26, 0.78);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
@@ -163,7 +170,14 @@ canvas {
 }
 
 .panel-content > * + * {
-    margin-top: 16px;
+    margin-top: 10px;
+}
+
+.panel-content::-webkit-scrollbar { width: 6px; }
+.panel-content::-webkit-scrollbar-track { background: transparent; }
+.panel-content::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 3px;
 }
 
 /* Red exit button, top-right of the panel header. Lets the user fully close
@@ -211,7 +225,9 @@ canvas {
     border: 0;
     height: 1px;
     background: linear-gradient(to right, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02));
-    margin: 18px 0;
+    /* Flex column = no margin collapsing, so this stacks with the 10px
+       sibling gap; keep it small or every divider costs ~34px of scroll. */
+    margin: 6px 0;
     width: 100%;
 }
 .control-group {
