@@ -68,10 +68,11 @@ canvas {
 .panel-handle {
     position: absolute;
     left: 0;
-    /* Fill the collapsed window's full height (30x48). A shorter centered
-       tab leaves transparent strips above/below it that Windows renders as
-       a faint box (layered windows aren't truly transparent there, unlike
-       macOS compositing). Cog stays centered via flex. */
+    /* Fill the collapsed window exactly (30x30). Window is sized to the cog
+       so the tab fits flush around the icon with no dead strip — a shorter
+       or taller tab leaves transparent bands that Windows renders as a faint
+       box (layered windows aren't truly transparent there, unlike macOS
+       compositing). Cog stays centered via flex. */
     top: 0;
     height: 100%;
     width: 30px;
@@ -130,6 +131,15 @@ canvas {
     border-radius: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    /* Reserve the scrollbar gutter unconditionally. WebView2 (Windows) uses
+       classic scrollbars that only reserve their track width while content
+       actually overflows, so short-content themes reflow ~6-8px further
+       right than tall ones — the padding is symmetric in code but the
+       available content width isn't. macOS WKWebView uses overlay
+       scrollbars (zero width, nothing to reserve), which is why this only
+       ever showed up on Windows. Reserving it always keeps content width
+       constant regardless of overflow state. */
+    scrollbar-gutter: stable;
     display: flex;
     flex-direction: column;
     gap: 0;

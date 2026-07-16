@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Novaframe",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "identifier": "com.novaframe.desktop.wallpaper",
   "build": {
     "frontendDist": "../src"
@@ -27,7 +27,7 @@
         "label": "settings",
         "title": "Novaframe Controls",
         "width": 30,
-        "height": 48,
+        "height": 30,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,

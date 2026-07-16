@@ -27,7 +27,7 @@ static SETTINGS_PANEL_LOCKED: AtomicBool = AtomicBool::new(false);
 // is pinned flush to the monitor's right edge, so matching the width to the cog
 // puts the icon flush against the screen edge with no floating gap.
 const COLLAPSED_WIDTH: f64 = 30.0;
-const COLLAPSED_HEIGHT: f64 = 48.0;
+const COLLAPSED_HEIGHT: f64 = 30.0;
 
 // ── Wallpaper pause coordination ────────────────────────────────────────────
 // The wallpaper render is paused (render loop suspended in the theme iframe)
