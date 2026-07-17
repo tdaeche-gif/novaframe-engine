@@ -700,6 +700,26 @@ function updateSettingsScope(themePath) {
                     return; // skip the <input> path below
                 }
 
+                // Button: fire a one-shot action message, nothing stored in config
+                if (setting.type === 'button') {
+                    label.textContent = ''; // button has its own text; suppress the label
+                    const btn = document.createElement('button');
+                    btn.id = `custom_setting_${setting.id}`;
+                    btn.textContent = setting.label || setting.id;
+                    btn.className = 'custom-action-btn';
+                    btn.addEventListener('click', () => {
+                        if (ThemeManager.currentIframe?.contentWindow) {
+                            ThemeManager.currentIframe.contentWindow.postMessage({
+                                type: 'novaframe-settings',
+                                settings: { [setting.id]: true }
+                            }, '*');
+                        }
+                    });
+                    group.appendChild(btn);
+                    customSettingsSection.appendChild(group);
+                    return; // skip the <input> path below
+                }
+
                 const input = document.createElement('input');
                 input.id = `custom_setting_${setting.id}`;
                 input.type = setting.type || 'text';
