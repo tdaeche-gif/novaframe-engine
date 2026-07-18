@@ -707,12 +707,22 @@ function updateSettingsScope(themePath) {
                     btn.id = `custom_setting_${setting.id}`;
                     btn.textContent = setting.label || setting.id;
                     btn.className = 'custom-action-btn';
-                    btn.addEventListener('click', () => {
+                    btn.addEventListener('click', async () => {
+                        // Optimistic local update (e.g. for the preview iframe in the settings window)
                         if (ThemeManager.currentIframe?.contentWindow) {
                             ThemeManager.currentIframe.contentWindow.postMessage({
                                 type: 'novaframe-settings',
                                 settings: { [setting.id]: true }
                             }, '*');
+                        }
+                        
+                        // Broadcast to other windows (specifically the background underlay window)
+                        if (window.__TAURI__ && window.__TAURI__.event) {
+                            try {
+                                await window.__TAURI__.event.emit('theme-action', setting.id);
+                            } catch (e) {
+                                console.error("[Novaframe] Theme action emit failed:", e);
+                            }
                         }
                     });
                     group.appendChild(btn);
@@ -1305,6 +1315,16 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (event.payload) {
                     config = event.payload;
                     relayThemeSettingsToIframe();
+                }
+            });
+
+            window.__TAURI__.event.listen('theme-action', (event) => {
+                const settingId = event.payload;
+                if (settingId && ThemeManager.currentIframe?.contentWindow) {
+                    ThemeManager.currentIframe.contentWindow.postMessage({
+                        type: 'novaframe-settings',
+                        settings: { [settingId]: true }
+                    }, '*');
                 }
             });
 
