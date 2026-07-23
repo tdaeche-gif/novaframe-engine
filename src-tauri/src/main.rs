@@ -265,6 +265,11 @@ async fn download_and_install_theme(
             .map_err(|e| format!("Failed to create themes dir: {}", e))?;
     }
 
+    // Guarantee the shared three.js runtime sits alongside the theme before it
+    // loads — covers the case where a theme is installed in a session that began
+    // before this build (startup sync already ran on the old binary).
+    sync_shared_runtime(&app);
+
     // Temp zip lives in a per-install file guarded by TempFileGuard so it is
     // removed on EVERY exit path (success, download error, bad zip, missing
     // manifest) — no leaked archives piling up in the OS temp dir.
@@ -620,6 +625,55 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 /// single URL segment, which breaks every relative subresource inside a theme
 /// (`./img.jpg`, `fetch('./shaders/x.frag')`). Serving with real directory segments
 /// lets relative URLs resolve natively.
+/// Copy the bundled three.min.js runtime into `AppData/themes/three.min.js`.
+///
+/// Every WebGL theme loads three.js via a relative `../three.min.js`, which
+/// resolves (through the theme:// protocol) to this single shared copy one level
+/// above each theme dir. Vendoring it here — instead of a CDN <script> in each
+/// theme — makes themes work offline/sandboxed and keeps three.js out of every
+/// theme zip (~600KB × N saved). Best-effort: a failure here just means a theme
+/// that shipped its own copy still works; a shared-only theme would fail to load,
+/// which the log below makes diagnosable.
+fn sync_shared_runtime(app: &tauri::AppHandle) {
+    let themes_dir = match app.path().app_data_dir() {
+        Ok(d) => d.join("themes"),
+        Err(e) => {
+            dlog(app, &format!("[shared-runtime] no app_data_dir: {}", e));
+            return;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&themes_dir) {
+        dlog(app, &format!("[shared-runtime] create themes dir failed: {}", e));
+        return;
+    }
+    let dest = themes_dir.join("three.min.js");
+
+    let src = match app
+        .path()
+        .resolve("resources/three.min.js", tauri::path::BaseDirectory::Resource)
+    {
+        Ok(p) => p,
+        Err(e) => {
+            dlog(app, &format!("[shared-runtime] resolve resource failed: {}", e));
+            return;
+        }
+    };
+
+    // Skip the copy when the destination already matches the bundled size — the
+    // runtime only changes on an engine upgrade, so this makes normal startups
+    // a cheap stat instead of a 600KB write.
+    let src_len = std::fs::metadata(&src).map(|m| m.len()).ok();
+    let dest_len = std::fs::metadata(&dest).map(|m| m.len()).ok();
+    if src_len.is_some() && src_len == dest_len {
+        return;
+    }
+
+    match std::fs::copy(&src, &dest) {
+        Ok(n) => dlog(app, &format!("[shared-runtime] wrote three.min.js ({} bytes) -> {:?}", n, dest)),
+        Err(e) => dlog(app, &format!("[shared-runtime] copy failed src={:?} err={}", src, e)),
+    }
+}
+
 /// Append a line to AppData/engine-debug.log. Release builds run as a Windows
 /// GUI-subsystem app with NO console, so println! is invisible in the field —
 /// this file is the only way to see what actually happened on a user's machine.
@@ -938,6 +992,9 @@ fn main() {
 
             dlog(&handle, &format!("==== engine start v{} os={} ====",
                 env!("CARGO_PKG_VERSION"), std::env::consts::OS));
+
+            // Ensure the shared three.js runtime is present before any theme loads.
+            sync_shared_runtime(&handle);
 
             // On Windows/Linux the novaframe:// scheme lives in the registry /
             // desktop files. The NSIS installer registers it, but re-assert at
