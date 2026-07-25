@@ -37,7 +37,7 @@ const COLLAPSED_HEIGHT: f64 = 30.0;
 // separate means a fullscreen game ending doesn't un-pause a manual pause, etc.
 static MANUAL_PAUSE: AtomicBool = AtomicBool::new(false); // tray "Pause Wallpaper"
 static FULLSCREEN_ACTIVE: AtomicBool = AtomicBool::new(false); // Windows fullscreen app
-static WINDOW_OCCLUDED: AtomicBool = AtomicBool::new(false); // macOS occlusion
+static WINDOW_OCCLUDED: AtomicBool = AtomicBool::new(false); // desktop hidden behind other windows
 
 /// Emit the combined visibility state to the frontend. Visible only when nothing
 /// wants the wallpaper paused.
@@ -46,6 +46,20 @@ fn recompute_wallpaper_visibility(app: &tauri::AppHandle) {
         || FULLSCREEN_ACTIVE.load(Ordering::Relaxed)
         || WINDOW_OCCLUDED.load(Ordering::Relaxed);
     let _ = app.emit("occlusion-change", !paused);
+}
+
+/// Current pause state, for the frontend to QUERY rather than wait to be told.
+///
+/// `occlusion-change` is only emitted on a transition, so a theme iframe that
+/// mounts (or re-mounts) while the wallpaper is already paused would otherwise
+/// never learn it — its SDK defaults to `occluded = false` and it renders at
+/// full rate forever, invisible, with the tray still saying "Resume Wallpaper".
+/// app.js calls this on every iframe load and pushes the result in.
+#[tauri::command]
+fn get_wallpaper_paused() -> bool {
+    MANUAL_PAUSE.load(Ordering::Relaxed)
+        || FULLSCREEN_ACTIVE.load(Ordering::Relaxed)
+        || WINDOW_OCCLUDED.load(Ordering::Relaxed)
 }
 
 #[tauri::command]
@@ -959,6 +973,142 @@ fn is_fullscreen_app_active() -> bool {
     }
 }
 
+/// True when every monitor's work area is fully covered by some other app's
+/// window — i.e. the desktop wallpaper is invisible and rendering it is pure
+/// waste.
+///
+/// This is the Windows counterpart to the macOS `NSWindow.occlusionState` poll.
+/// Windows has no equivalent API for a desktop-underlay window: our wallpaper
+/// window lives under WorkerW and is `alwaysOnBottom`, so Chromium always
+/// considers it visible and never throttles it on its own. Without this check
+/// the only thing that ever paused the render on Windows was
+/// `is_fullscreen_app_active()`, which does NOT fire for a merely *maximized*
+/// window — so a maximized browser meant a full-screen shader running at 30fps
+/// into pixels nobody could see.
+///
+/// Coverage is tested against each monitor's WORK AREA (`rcWork`), not its full
+/// bounds: a maximized window stops at the taskbar, and the wallpaper strip
+/// behind an opaque taskbar isn't visible either.
+///
+/// Known limit: this only detects a SINGLE window covering a monitor. Two
+/// half-screen windows tiled side by side also hide the desktop but are not
+/// caught here — that needs real region subtraction. The common case (one
+/// maximized window) is what matters and this catches it.
+#[cfg(target_os = "windows")]
+fn desktop_is_covered() -> bool {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM, RECT, TRUE};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+        IsWindowVisible,
+    };
+
+    // Shell windows that are always full-screen but are not "covering" anything:
+    // Progman/WorkerW ARE the desktop, and the tray is the taskbar itself.
+    const SHELL_CLASSES: [&str; 5] = [
+        "Progman",
+        "WorkerW",
+        "Shell_TrayWnd",
+        "SHELLDLL_DefView",
+        "Windows.UI.Core.CoreWindow",
+    ];
+
+    unsafe extern "system" fn monitor_proc(
+        _mon: HMONITOR,
+        _hdc: HDC,
+        _rc: *mut RECT,
+        data: LPARAM,
+    ) -> BOOL {
+        let out = unsafe { &mut *(data.0 as *mut Vec<RECT>) };
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if unsafe { GetMonitorInfoW(_mon, &mut info) }.as_bool() {
+            out.push(info.rcWork); // work area, not rcMonitor — see doc comment
+        }
+        TRUE
+    }
+
+    unsafe extern "system" fn window_proc(hwnd: HWND, data: LPARAM) -> BOOL {
+        let out = unsafe { &mut *(data.0 as *mut Vec<RECT>) };
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+                return TRUE;
+            }
+            // Skip our own windows — the wallpaper window is itself full-screen
+            // and would otherwise "cover" every monitor and pause forever.
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == GetCurrentProcessId() {
+                return TRUE;
+            }
+            // Cloaked windows are visible-but-not-rendered (suspended UWP apps,
+            // windows on another virtual desktop). They hide nothing.
+            let mut cloaked = 0u32;
+            if DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_CLOAKED,
+                &mut cloaked as *mut u32 as *mut std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            )
+            .is_ok()
+                && cloaked != 0
+            {
+                return TRUE;
+            }
+            let mut buf = [0u16; 64];
+            let n = GetClassNameW(hwnd, &mut buf) as usize;
+            let class = String::from_utf16_lossy(&buf[..n]);
+            if SHELL_CLASSES.iter().any(|c| *c == class) {
+                return TRUE;
+            }
+            let mut r = RECT::default();
+            if GetWindowRect(hwnd, &mut r).is_ok() && r.right > r.left && r.bottom > r.top {
+                out.push(r);
+            }
+        }
+        TRUE
+    }
+
+    let mut monitors: Vec<RECT> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(monitor_proc),
+            LPARAM(&mut monitors as *mut _ as isize),
+        );
+    }
+    if monitors.is_empty() {
+        return false; // no info = assume visible, never pause on a guess
+    }
+
+    let mut windows: Vec<RECT> = Vec::new();
+    unsafe {
+        if EnumWindows(Some(window_proc), LPARAM(&mut windows as *mut _ as isize)).is_err() {
+            return false;
+        }
+    }
+
+    // A few px of slack: maximized windows sit a hair inside/outside the work
+    // area depending on DPI and invisible resize borders.
+    const SLACK: i32 = 4;
+    monitors.iter().all(|m| {
+        windows.iter().any(|w| {
+            w.left <= m.left + SLACK
+                && w.top <= m.top + SLACK
+                && w.right >= m.right - SLACK
+                && w.bottom >= m.bottom - SLACK
+        })
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         // Must be the first plugin registered. Without it, clicking a
@@ -1053,24 +1203,42 @@ fn main() {
             // ── System tray ─────────────────────────────────────────────────
             build_tray(&handle);
 
-            // ── Pause-on-fullscreen (Windows) ───────────────────────────────
-            // macOS already pauses via the occlusion loop (a fullscreen app
-            // occludes the desktop wallpaper window). Windows needs an explicit
-            // check: SHQueryUserNotificationState reports when a fullscreen game
-            // / presentation is running so we can suspend the render loop.
+            // ── Pause-on-hidden (Windows) ───────────────────────────────────
+            // macOS pauses via the NSWindow occlusion loop further down. Windows
+            // has no such signal for a desktop-underlay window, so poll two
+            // things here:
+            //   1. SHQueryUserNotificationState — a fullscreen game/presentation.
+            //   2. desktop_is_covered() — every monitor's work area covered by
+            //      some other app's window (the ordinary "maximized browser"
+            //      case, which (1) does NOT report).
+            // Without (2) the wallpaper shader ran at full rate behind every
+            // maximized window — the single biggest source of idle GPU load on
+            // Windows.
             #[cfg(target_os = "windows")]
             {
                 let fs_handle = handle.clone();
                 std::thread::spawn(move || {
-                    let mut last = false;
+                    let mut last_fullscreen = false;
+                    let mut last_covered = false;
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(800));
+
                         let fullscreen = is_fullscreen_app_active();
-                        if fullscreen != last {
-                            last = fullscreen;
+                        if fullscreen != last_fullscreen {
+                            last_fullscreen = fullscreen;
                             FULLSCREEN_ACTIVE.store(fullscreen, Ordering::Relaxed);
                             recompute_wallpaper_visibility(&fs_handle);
                             dlog(&fs_handle, &format!("[pause] fullscreen app active={}", fullscreen));
+                        }
+
+                        // Skip the (more expensive) window enumeration while a
+                        // fullscreen app already has us paused.
+                        let covered = if fullscreen { last_covered } else { desktop_is_covered() };
+                        if covered != last_covered {
+                            last_covered = covered;
+                            WINDOW_OCCLUDED.store(covered, Ordering::Relaxed);
+                            recompute_wallpaper_visibility(&fs_handle);
+                            dlog(&fs_handle, &format!("[pause] desktop covered={}", covered));
                         }
                     }
                 });
@@ -1148,9 +1316,22 @@ fn main() {
                     dlog(&handle, &format!("[Novaframe] set_ignore_cursor_events failed: {}", e));
                 }
 
+                // OPAQUE on Windows, deliberately. This window IS the desktop
+                // background: its page paints solid (`body` is #0f141d, the theme
+                // iframe is #000), so there is never anything to see through it.
+                // It used to be `transparent: true` + alpha 0, which makes it a
+                // per-pixel-alpha layered window. That costs on two fronts:
+                //   - DWM must alpha-blend a full monitor-sized surface every
+                //     refresh (2560x1440 @ 120Hz), and
+                //   - a layered window can't be reliably occlusion-culled, since
+                //     the compositor must assume something behind may show
+                //     through — so covering it with another window doesn't
+                //     dependably stop the work.
+                // See tauri.windows.conf.json, which sets `transparent: false`
+                // for this window on Windows only (macOS config is untouched).
                 #[cfg(target_os = "windows")]
                 {
-                    let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+                    let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 255)));
                 }
 
                 // Re-run the full layout pass AFTER the underlay reparent so the
@@ -1325,7 +1506,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, get_themes_dir, get_hardware_id, set_autostart, get_autostart])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, get_themes_dir, get_hardware_id, set_autostart, get_autostart, get_wallpaper_paused])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }

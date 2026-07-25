@@ -54,6 +54,14 @@ canvas {
    - When Rust expands the window to 275px on hover, the content becomes
      fully visible alongside the cog.                                                   */
 
+/* Synchronous window-role gating (set by the inline <head> script from the
+   ?mode= param). Hides the wrong-window DOM before first paint so a reload of
+   the fullscreen main window never flashes the settings panel across the
+   screen. app.js still sets these display values later; this just wins the race
+   on the initial render. */
+html[data-mode="main"] #settingsPanel { display: none; }
+html[data-mode="settings"] #container { display: none; }
+
 #settingsPanel {
     position: absolute;
     top: 0;

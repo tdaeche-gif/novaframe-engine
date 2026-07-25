@@ -1,6 +1,6 @@
 [package]
 name = "novaframe_engine"
-version = "0.3.6"
+version = "0.3.7"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -49,7 +49,16 @@ objc2-app-kit = "0.3.2"
 # SHQueryUserNotificationState — detects a fullscreen game/presentation so the
 # wallpaper render can be paused (GPU/battery). Reuses the same windows crate
 # version Tauri already pulls in, so no duplicate compilation.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell"] }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    # desktop_is_covered(): enumerate top-level windows + monitors to detect when
+    # every monitor's work area is fully covered, so the render loop can pause.
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

@@ -343,6 +343,14 @@ const ThemeManager = {
             // after the next paint to be safe.
             requestAnimationFrame(() => postViewport('novaframe-theme-ready'));
 
+            // Tell the fresh theme whether the wallpaper is currently PAUSED.
+            // `occlusion-change` only fires on a transition, so without this a
+            // theme that mounts (or gets reloaded by the failsafe below) while
+            // paused starts with occluded=false and renders at full rate
+            // forever — invisible, with the tray still reading "Resume".
+            // This was silently burning the GPU on every reload.
+            pushCurrentOcclusion(iframe);
+
             // Dispatch settings: manifest defaults overlaid with any saved values.
             // Guarantees a freshly installed theme starts from its manifest
             // defaults and a returning theme gets the user's saved state.
@@ -387,6 +395,26 @@ const ThemeManager = {
         _lastRelayedSettings = null;
     }
 };
+
+// ── Occlusion state push ───────────────────────────────────────────────────
+// The engine emits `occlusion-change` only when the state CHANGES, so a theme
+// iframe that mounts afterwards never hears about a pause that is already in
+// effect. Query the authoritative value from Rust and push it into the frame.
+// `_lastKnownOccluded` is the fallback if the command isn't available.
+let _lastKnownOccluded = false;
+async function pushCurrentOcclusion(iframe) {
+    let occluded = _lastKnownOccluded;
+    try {
+        const invoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+        if (invoke) occluded = await invoke('get_wallpaper_paused');
+    } catch (e) {
+        console.warn('[Novaframe] get_wallpaper_paused unavailable, using cached state', e);
+    }
+    _lastKnownOccluded = occluded;
+    try {
+        iframe?.contentWindow?.postMessage({ type: 'novaframe-occlusion', occluded }, '*');
+    } catch (_) {}
+}
 
 // ── Live settings relay (main window) ──────────────────────────────────────
 // Forward the active theme's saved settings to the wallpaper iframe. Called
@@ -1307,8 +1335,15 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const absoluteThemePath = event.payload;
                 console.log("[Novaframe] Received theme-installed event with path:", absoluteThemePath);
                 await ConfigManager.setTheme(absoluteThemePath);
-                // Full reload — scanThemes() will re-run and select the newly installed theme
-                window.location.reload();
+                // Main window: swap the theme in place — no full reload, so the
+                // fullscreen underlay never repaints bare HTML (was the source of
+                // the settings-panel flash). Settings window still reloads so
+                // scanThemes() re-runs and the dropdown picks up the new theme.
+                if (isSettingsWindow) {
+                    window.location.reload();
+                } else {
+                    ThemeManager.loadTheme(absoluteThemePath);
+                }
             });
 
             window.__TAURI__.event.listen('config-changed', (event) => {
@@ -1328,17 +1363,34 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             });
 
-            // macOS Sleep Failsafe (Bulletproof)
+            // Sleep Failsafe
             // When the OS goes to sleep, the WebGL context in the iframe is often lost or frozen.
             // A delta-time interval detects if the CPU actually slept (e.g. >5 seconds passed between 1s intervals).
             // Main window only — the settings window never mounts an iframe,
             // so its copy of this timer was pure waste.
+            //
+            // CAUTION: a late timer is NOT proof of sleep. This window lives under
+            // WorkerW and is never foreground, so the browser throttles its timers
+            // — a busy machine can overshoot 5s with no sleep involved. Each false
+            // positive reloads the theme, which re-creates the WebGL context and
+            // re-uploads its textures (iss-window decodes a 4096x2048 base64 Blue
+            // Marble and regenerates mipmaps). Two guards below:
+            //   1. Never reload while the wallpaper is paused — there is no live
+            //      context to rescue, and the reloaded theme would come back up
+            //      rendering. (`pushCurrentOcclusion` on load covers the case
+            //      where a reload does happen, but not reloading is cheaper.)
+            //   2. Raised threshold + a real log line, so a reload loop is
+            //      visible in the console instead of silent.
             let lastTick = Date.now();
+            const SLEEP_GAP_MS = 20000;
             if (!isSettingsWindow) setInterval(() => {
                 const now = Date.now();
-                if (now - lastTick > 5000) {
-                    console.log("Wake from sleep detected. Reloading iframe to restore WebGL context.");
-                    if (ThemeManager.currentIframe) {
+                const gap = now - lastTick;
+                if (gap > SLEEP_GAP_MS) {
+                    if (_lastKnownOccluded) {
+                        console.log(`[Novaframe] timer gap ${gap}ms while paused — skipping iframe reload`);
+                    } else if (ThemeManager.currentIframe) {
+                        console.log(`[Novaframe] timer gap ${gap}ms — reloading iframe to restore WebGL context`);
                         // Force a hard reload of the iframe to obliterate the dead WebGL context
                         const currentSrc = ThemeManager.currentIframe.src;
                         ThemeManager.currentIframe.src = 'about:blank';
@@ -1352,6 +1404,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             window.__TAURI__.event.listen('occlusion-change', (event) => {
                 const isVisible = event.payload;
+                // Cache it so a theme mounted later can be told without a round
+                // trip, and so the sleep failsafe can skip pointless reloads.
+                _lastKnownOccluded = !isVisible;
                 // Broadcast to external themes so they can pause their render loops
                 if (ThemeManager.currentIframe?.contentWindow) {
                     try {
