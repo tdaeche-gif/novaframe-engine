@@ -38,14 +38,64 @@ const COLLAPSED_HEIGHT: f64 = 30.0;
 static MANUAL_PAUSE: AtomicBool = AtomicBool::new(false); // tray "Pause Wallpaper"
 static FULLSCREEN_ACTIVE: AtomicBool = AtomicBool::new(false); // Windows fullscreen app
 static WINDOW_OCCLUDED: AtomicBool = AtomicBool::new(false); // desktop hidden behind other windows
+static ON_BATTERY: AtomicBool = AtomicBool::new(false); // unplugged, and the user asked us to pause
+/// Whether "pause on battery" is switched on. Off by default: a wallpaper that
+/// vanishes the moment the charger comes out looks like a crash, so this is
+/// something the user opts into rather than discovers.
+static BATTERY_SAVER_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Emit the combined visibility state to the frontend. Visible only when nothing
 /// wants the wallpaper paused.
 fn recompute_wallpaper_visibility(app: &tauri::AppHandle) {
     let paused = MANUAL_PAUSE.load(Ordering::Relaxed)
         || FULLSCREEN_ACTIVE.load(Ordering::Relaxed)
-        || WINDOW_OCCLUDED.load(Ordering::Relaxed);
+        || WINDOW_OCCLUDED.load(Ordering::Relaxed)
+        || (BATTERY_SAVER_ENABLED.load(Ordering::Relaxed) && ON_BATTERY.load(Ordering::Relaxed));
     let _ = app.emit("occlusion-change", !paused);
+}
+
+/// Turn "pause on battery" on or off from the settings panel. Recomputes
+/// immediately so switching it on while already unplugged pauses now, rather
+/// than at the next poll.
+#[tauri::command]
+fn set_battery_saver(app: tauri::AppHandle, enabled: bool) {
+    BATTERY_SAVER_ENABLED.store(enabled, Ordering::Relaxed);
+    recompute_wallpaper_visibility(&app);
+    dlog(&app, &format!("[pause] battery saver enabled={}", enabled));
+}
+
+/// True when the machine is running on battery rather than mains power.
+///
+/// macOS: `pmset -g batt` prints "Now drawing from 'AC Power'" or "'Battery
+/// Power'". Shelling out once a minute is cheaper in both code and binary size
+/// than binding IOKit's power-source APIs for one boolean.
+#[cfg(target_os = "macos")]
+fn running_on_battery() -> bool {
+    std::process::Command::new("/usr/bin/pmset")
+        .args(["-g", "batt"])
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains("Battery Power"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn running_on_battery() -> bool {
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    unsafe {
+        let mut status = SYSTEM_POWER_STATUS::default();
+        if GetSystemPowerStatus(&mut status).is_ok() {
+            // ACLineStatus: 0 = offline (battery), 1 = online, 255 = unknown.
+            status.ACLineStatus == 0
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn running_on_battery() -> bool {
+    false
 }
 
 /// Current pause state, for the frontend to QUERY rather than wait to be told.
@@ -688,6 +738,49 @@ fn sync_shared_runtime(app: &tauri::AppHandle) {
     }
 }
 
+/// Delete one installed theme from AppData/themes.
+///
+/// Takes the directory NAME, never a path: the name is rejected outright if it
+/// contains a separator or `..`, and the resolved directory must still be a
+/// direct child of the themes dir. A delete command that accepted a path would
+/// be an arbitrary-directory-removal primitive reachable from the webview.
+fn is_safe_theme_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.starts_with('.')
+}
+
+#[tauri::command]
+fn delete_theme(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    if !is_safe_theme_name(&name) {
+        return Err("Invalid theme name".into());
+    }
+
+    let themes_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("No app data dir: {}", e))?
+        .join("themes");
+
+    let target = themes_dir.join(&name);
+    if !target.is_dir() {
+        return Err("Theme not found".into());
+    }
+    // Belt and braces after the name check: a symlinked child would otherwise
+    // resolve outside the themes dir.
+    let canonical_target = target.canonicalize().map_err(|e| e.to_string())?;
+    let canonical_root = themes_dir.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical_target.starts_with(&canonical_root) || canonical_target == canonical_root {
+        return Err("Refusing to delete outside the themes directory".into());
+    }
+
+    std::fs::remove_dir_all(&canonical_target).map_err(|e| e.to_string())?;
+    dlog(&app, &format!("[library] deleted theme {:?}", canonical_target));
+    Ok(())
+}
+
 /// The theme every fresh install starts with.
 ///
 /// Without this, a new user installs the engine and gets nothing — the desktop
@@ -1012,6 +1105,37 @@ fn build_tray(app: &tauri::AppHandle) {
 
 /// True when a fullscreen game / video / presentation is in the foreground, so
 /// the wallpaper render should be paused to free the GPU.
+/// True when macOS considers the wallpaper window hidden behind other windows.
+///
+/// The macOS counterpart to `desktop_is_covered()` on Windows, and much cheaper
+/// than it: the WindowServer already tracks this per window and exposes it as
+/// `NSWindow.occlusionState`, so there's no window enumeration or region math —
+/// a maximized or full-screen app clears the `visible` bit for us.
+///
+/// Until this existed, nothing on macOS ever paused the render: the Windows
+/// coverage poll is `#[cfg(target_os = "windows")]`, so a shader kept running
+/// at full rate behind every full-screen window, which on a laptop is a
+/// straight tax on the battery.
+#[cfg(target_os = "macos")]
+fn macos_window_occluded(window: &tauri::WebviewWindow) -> bool {
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSWindow, NSWindowOcclusionState};
+
+    let ptr = match window.ns_window() {
+        Ok(p) => p as *mut AnyObject,
+        Err(_) => return false,
+    };
+    if ptr.is_null() {
+        return false;
+    }
+
+    // Safe as long as the window is alive, which it is: we hold a WebviewWindow
+    // for the whole poll and Tauri owns the NSWindow behind it.
+    let ns_window: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
+    let state = ns_window.occlusionState();
+    !state.contains(NSWindowOcclusionState::Visible)
+}
+
 #[cfg(target_os = "windows")]
 fn is_fullscreen_app_active() -> bool {
     use windows::Win32::UI::Shell::{
@@ -1307,6 +1431,68 @@ fn main() {
                 });
             }
 
+            // macOS: poll the wallpaper window's own occlusion state. Must run
+            // on the main thread — AppKit's occlusionState is not safe to read
+            // from a spawned thread — so this rides the app's own event loop
+            // via run_on_main_thread instead of a std::thread like the Windows
+            // poll above.
+            #[cfg(target_os = "macos")]
+            {
+                let occ_handle = handle.clone();
+                std::thread::spawn(move || {
+                    let last = std::sync::Arc::new(AtomicBool::new(false));
+                    let logged_first = std::sync::Arc::new(AtomicBool::new(false));
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(1000));
+                        let logged_first = logged_first.clone();
+                        let h = occ_handle.clone();
+                        let last = last.clone();
+                        let _ = occ_handle.run_on_main_thread(move || {
+                            if let Some(w) = h.get_webview_window("main") {
+                                let occluded = macos_window_occluded(&w);
+                                // First reading goes in the log unconditionally,
+                                // so the log distinguishes "poll never ran" from
+                                // "state never changed".
+                                if !logged_first.swap(true, Ordering::Relaxed) {
+                                    dlog(&h, &format!("[pause] macOS occlusion poll started, occluded={}", occluded));
+                                }
+                                if occluded != last.load(Ordering::Relaxed) {
+                                    last.store(occluded, Ordering::Relaxed);
+                                    WINDOW_OCCLUDED.store(occluded, Ordering::Relaxed);
+                                    recompute_wallpaper_visibility(&h);
+                                    dlog(&h, &format!("[pause] macOS window occluded={}", occluded));
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+
+            // Power source poll. One minute is plenty — nobody plugs in and out
+            // faster than that, and a shell-out per second would be its own
+            // battery drain.
+            {
+                let batt_handle = handle.clone();
+                std::thread::spawn(move || {
+                    let mut last = running_on_battery();
+                    ON_BATTERY.store(last, Ordering::Relaxed);
+                    // Log the starting value too: transitions alone leave a
+                    // field log where you can't tell "never changed" from
+                    // "never ran".
+                    dlog(&batt_handle, &format!("[pause] power source at startup: on battery={}", last));
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(60));
+                        let on_battery = running_on_battery();
+                        if on_battery != last {
+                            last = on_battery;
+                            ON_BATTERY.store(on_battery, Ordering::Relaxed);
+                            recompute_wallpaper_visibility(&batt_handle);
+                            dlog(&batt_handle, &format!("[pause] on battery={}", on_battery));
+                        }
+                    }
+                });
+            }
+
             // Spawn monitor configuration polling thread
             let handle_clone = handle.clone();
             std::thread::spawn(move || {
@@ -1569,7 +1755,28 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, get_themes_dir, get_hardware_id, set_autostart, get_autostart, get_wallpaper_paused])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, get_themes_dir, get_hardware_id, set_autostart, get_autostart, get_wallpaper_paused, delete_theme, set_battery_saver])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_theme_name;
+
+    #[test]
+    fn rejects_path_traversal_and_separators() {
+        // Every one of these would let a webview-triggered delete escape the
+        // themes directory.
+        for bad in ["", "..", "../..", "a/b", "a\\b", "..\\windows", ".hidden", "x/../../etc"] {
+            assert!(!is_safe_theme_name(bad), "should reject {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn accepts_real_theme_dir_names() {
+        for good in ["breathing-gradient", "Lightning Storm", "Serif Monogram Initials", "deep-space"] {
+            assert!(is_safe_theme_name(good), "should accept {:?}", good);
+        }
+    }
 }

@@ -464,7 +464,15 @@ const DEFAULT_CONFIG = {
         { name: "New York", lat: 40.7128, lon: -74.0060 },
         { name: "Hong Kong", lat: 22.3193, lon: 114.1694 }
     ],
-    theme_settings: {}
+    theme_settings: {},
+    // Cycle through installed wallpapers instead of sitting on one.
+    rotation_enabled: false,
+    rotation_interval_min: 60,
+    // Suspend the render when unplugged. Off by default — a wallpaper that
+    // disappears on unplug reads as a crash unless it was asked for.
+    pause_on_battery: false,
+    // First-run orientation overlay: shown once, then never again.
+    onboarding_seen: false
 };
 
 let config = DEFAULT_CONFIG;
@@ -887,6 +895,139 @@ async function initSettingsUI() {
             }
         });
     }
+
+    // 6. Library management, rotation and power controls.
+    initDeleteThemeButton();
+    initBatterySaverToggle();
+    initRotationControls();
+}
+
+// ── Library management ─────────────────────────────────────────────────────
+// Until now the only way to remove a wallpaper was to find AppData by hand.
+// The engine installs one theme per purchase and never removed anything, so a
+// library grew monotonically and the dropdown with it.
+function initDeleteThemeButton() {
+    const btn = document.getElementById('deleteThemeBtn');
+    const selector = document.getElementById('themeSelector');
+    if (!btn || !selector) return;
+
+    btn.addEventListener('click', async () => {
+        const themePath = selector.value;
+        if (!themePath) return;
+
+        const label = ThemeManager.manifestCache[themePath]?.label || 'this wallpaper';
+        const dirName = themePath.split('/').pop();
+
+        const ok = await confirmInPanel(
+            `Remove "${label}" from this machine? You can re-apply it any time from My Vault.`,
+            'Remove'
+        );
+        if (!ok) return;
+
+        try {
+            await window.__TAURI__.core.invoke('delete_theme', { name: dirName });
+        } catch (err) {
+            console.error('[Novaframe] delete_theme failed:', err);
+            alertInPanel(`Could not remove that wallpaper: ${err}`);
+            return;
+        }
+
+        // Forget the cached manifest and the active-theme pointer, then rescan:
+        // scanThemes auto-selects the first remaining theme when the active one
+        // is gone, which is exactly the behaviour wanted here.
+        delete ThemeManager.manifestCache[themePath];
+        if ((await ConfigManager.getTheme()) === themePath) {
+            await ConfigManager.setTheme('');
+        }
+        await scanThemes();
+        updateSettingsScope(await ConfigManager.getTheme());
+    });
+}
+
+// ── Pause on battery ───────────────────────────────────────────────────────
+function initBatterySaverToggle() {
+    const toggle = document.getElementById('batterySaverToggle');
+    if (!toggle || !window.__TAURI__?.core?.invoke) return;
+
+    toggle.checked = config.pause_on_battery === true;
+    // Rust holds this in an atomic that resets on every launch, so push the
+    // saved value back in at startup rather than waiting for a user change.
+    window.__TAURI__.core.invoke('set_battery_saver', { enabled: toggle.checked })
+        .catch(err => console.error('[Novaframe] set_battery_saver failed:', err));
+
+    toggle.addEventListener('change', async (e) => {
+        const enabled = e.target.checked;
+        config.pause_on_battery = enabled;
+        await ConfigManager.saveConfig();
+        try {
+            await window.__TAURI__.core.invoke('set_battery_saver', { enabled });
+        } catch (err) {
+            console.error('[Novaframe] set_battery_saver failed:', err);
+        }
+    });
+}
+
+// ── Rotation ───────────────────────────────────────────────────────────────
+// Owned by the settings window alone. The main window already polls the store
+// for `activeTheme` once a second, so switching the theme here propagates
+// through the existing path — no second mount mechanism, no risk of both
+// windows rotating out of step.
+let _rotationTimer = null;
+
+function initRotationControls() {
+    const toggle = document.getElementById('rotationToggle');
+    const intervalRow = document.getElementById('rotationIntervalRow');
+    const intervalSelect = document.getElementById('rotationInterval');
+    if (!toggle || !intervalSelect || !intervalRow) return;
+
+    toggle.checked = config.rotation_enabled === true;
+    intervalSelect.value = String(config.rotation_interval_min || 60);
+    intervalRow.style.display = toggle.checked ? 'block' : 'none';
+
+    toggle.addEventListener('change', async (e) => {
+        config.rotation_enabled = e.target.checked;
+        intervalRow.style.display = e.target.checked ? 'block' : 'none';
+        await ConfigManager.saveConfig();
+        startRotationTimer();
+    });
+
+    intervalSelect.addEventListener('change', async (e) => {
+        config.rotation_interval_min = Number(e.target.value) || 60;
+        await ConfigManager.saveConfig();
+        startRotationTimer();
+    });
+
+    startRotationTimer();
+}
+
+function startRotationTimer() {
+    if (_rotationTimer) {
+        clearInterval(_rotationTimer);
+        _rotationTimer = null;
+    }
+    if (!config.rotation_enabled) return;
+
+    const minutes = Number(config.rotation_interval_min) || 60;
+    _rotationTimer = setInterval(rotateToNextTheme, minutes * 60 * 1000);
+}
+
+async function rotateToNextTheme() {
+    const selector = document.getElementById('themeSelector');
+    if (!selector) return;
+
+    const options = Array.from(selector.querySelectorAll('option')).filter(o => o.value !== '');
+    // One wallpaper isn't a rotation; two or more is.
+    if (options.length < 2) return;
+
+    const current = await ConfigManager.getTheme();
+    const index = options.findIndex(o => o.value === current);
+    const next = options[(index + 1) % options.length];
+    if (!next || next.value === current) return;
+
+    selector.value = next.value;
+    await ConfigManager.setTheme(next.value);
+    updateSettingsScope(next.value);
+    console.log('[Novaframe] rotation → ', next.textContent);
 }
 
 // ── Dynamic Theme Scanner (Module 1) ───────────────────────────────────────
@@ -1544,6 +1685,28 @@ function setWelcomeVisible(visible) {
     overlay.style.display = visible && isMainWindow ? 'flex' : 'none';
 }
 
+// ── First-run orientation (main window) ────────────────────────────────────
+// Shown once per install. The main window is click-through and has no dock
+// icon, so a new user genuinely cannot find the app without being told — but
+// being told twice is nagging, hence the persisted flag.
+async function showOnboardingOnce() {
+    const overlay = document.getElementById('onboardingOverlay');
+    if (!overlay) return;
+    if (config.onboarding_seen === true) return;
+
+    config.onboarding_seen = true;
+    await ConfigManager.saveConfig();
+
+    overlay.style.display = 'flex';
+    // Next frame, so the opacity transition has a start value to animate from.
+    requestAnimationFrame(() => { overlay.style.opacity = '1'; });
+
+    setTimeout(() => {
+        overlay.style.opacity = '0';
+        setTimeout(() => { overlay.style.display = 'none'; }, 700);
+    }, 9000);
+}
+
 // ── Theme content updates ───────────────────────────────────────────────────
 // Asks the backend which installed themes have a newer build published
 // (compares manifest.version against wallpapers.engine_manifest.version).
@@ -1603,10 +1766,17 @@ async function checkThemeContentUpdates() {
         setTimeout(themeCheck, 20 * 1000);
         setInterval(themeCheck, AUTO_CHECK_INTERVAL_MS);
     } else {
-        // Main window: if nothing is mounted shortly after startup, this is a
-        // fresh install — show the welcome instructions.
+        // Main window. Two different first-run cases:
+        //   nothing mounted  → the old "no wallpapers installed" instructions
+        //   something mounted → since 0.3.8 that's the bundled default theme on
+        //                       a fresh install, and the user still has no idea
+        //                       where the app lives. Orient them once.
         setTimeout(() => {
-            if (!ThemeManager.currentManifest) setWelcomeVisible(true);
+            if (!ThemeManager.currentManifest) {
+                setWelcomeVisible(true);
+            } else {
+                showOnboardingOnce();
+            }
         }, 2500);
     }
 }

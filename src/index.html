@@ -46,6 +46,22 @@
         <style>@keyframes nfPulse { 0%,100% { opacity:.35; transform:translateY(-50%) translateX(0);} 50% { opacity:1; transform:translateY(-50%) translateX(6px);} }</style>
     </div>
 
+    <!-- First-run orientation (main window only, shown once).
+         Since 0.3.8 a fresh install already HAS a wallpaper running, so the
+         "nothing is installed" overlay above never fires for a new user — and
+         nothing else ever told them the app has no window, no dock icon and
+         lives at the right screen edge. This fades itself out. -->
+    <div id="onboardingOverlay" style="display:none; position:fixed; inset:0; z-index:6; align-items:flex-end; justify-content:center; font-family:'Outfit',sans-serif; color:#e4e4e7; pointer-events:none; opacity:0; transition:opacity .6s ease;">
+        <div style="margin-bottom:8vh; max-width:440px; padding:22px 26px; border-radius:18px; background:rgba(9,9,11,0.72); backdrop-filter:blur(18px); border:1px solid rgba(255,255,255,0.12); box-shadow:0 20px 60px rgba(0,0,0,0.45); text-align:center;">
+            <div style="font-size:17px; font-weight:700; margin-bottom:8px;">This is Novaframe.</div>
+            <p style="margin:0; font-size:14px; line-height:1.65; color:#a1a1aa;">
+                Your wallpaper is live and running. Novaframe has no window — to change it,
+                move your mouse to the <strong style="color:#e4e4e7;">right edge</strong> of the screen,
+                or use the <strong style="color:#e4e4e7;">tray icon</strong>.
+            </p>
+        </div>
+    </div>
+
     <div id="settingsPanel">
         <div class="panel-content">
             <div style="display: flex; align-items: center; gap: 10px;">
@@ -67,6 +83,12 @@
                     <select id="themeSelector" style="flex: 1; height: 36px; box-sizing: border-box; margin-bottom: 0;">
                         <option value="" disabled selected>Select Wallpaper</option>
                     </select>
+                    <button id="deleteThemeBtn" style="width: 36px; height: 36px; box-sizing: border-box; flex-shrink: 0; padding: 0; border-radius: 6px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #fff; cursor: pointer; transition: all 0.2s ease;" title="Remove this wallpaper from your library" aria-label="Remove this wallpaper">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                    </button>
                     <button id="refreshThemeBtn" style="width: 36px; height: 36px; box-sizing: border-box; flex-shrink: 0; padding: 0; border-radius: 6px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #fff; cursor: pointer; transition: all 0.2s ease;" title="Reload Wallpaper">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                             <polyline points="23 4 23 10 17 10"></polyline>
@@ -87,10 +109,36 @@
 
 
             <hr style="margin-top: 20px; margin-bottom: 20px;" />
+
+            <!-- Rotation: cycle through everything installed, so a library of
+                 wallpapers is worth more than the one you happened to pick. -->
+            <div class="control-group" style="margin-top: 0;">
+                <label class="toggle-row" for="rotationToggle">
+                    <span>Rotate wallpapers</span>
+                    <input type="checkbox" id="rotationToggle">
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                </label>
+                <div id="rotationIntervalRow" style="display:none; margin-top:10px;">
+                    <label for="rotationInterval">Change every</label>
+                    <select id="rotationInterval" style="width:100%; height:36px; box-sizing:border-box;">
+                        <option value="15">15 minutes</option>
+                        <option value="60" selected>Hour</option>
+                        <option value="360">6 hours</option>
+                        <option value="1440">Day</option>
+                    </select>
+                </div>
+            </div>
+
+            <hr style="margin-top: 20px; margin-bottom: 20px;" />
             <div class="control-group" style="margin-top: 0;">
                 <label class="toggle-row" for="autostartToggle">
                     <span>Launch on startup</span>
                     <input type="checkbox" id="autostartToggle">
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                </label>
+                <label class="toggle-row" for="batterySaverToggle" style="margin-top:10px;">
+                    <span>Pause on battery</span>
+                    <input type="checkbox" id="batterySaverToggle">
                     <span class="toggle-track"><span class="toggle-thumb"></span></span>
                 </label>
             </div>
