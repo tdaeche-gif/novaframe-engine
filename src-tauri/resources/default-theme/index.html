@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Breathing Gradient</title>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100vw; height: 100vh; overflow: hidden; background-color: #1a1e3c; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+    </style>
+</head>
+<body>
+    <script src="../three.min.js"></script>
+    <script src="./novaframe-wallpaper.js"></script>
+    <script>
+        const scene = new THREE.Scene();
+        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "low-power", preserveDrawingBuffer: true });
+        renderer.setPixelRatio(1);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        renderer.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault(); if (window.wp) window.wp.pause(); }, false);
+        renderer.domElement.addEventListener('webglcontextrestored', () => { if (window.wp) window.wp.resume(); }, false);
+
+        const uniforms = {
+            u_time: { value: 0.0 },
+            u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+            u_color_a: { value: new THREE.Color("#1a1e3c") },
+            u_color_b: { value: new THREE.Color("#c96f8e") },
+            u_speed: { value: 0.26 },
+            u_grain: { value: 0.3 }
+        };
+
+        const vertexShader = `precision highp float; varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position,1.0); }`;
+
+        const fragmentShader = `
+            precision highp float;
+            uniform float u_time; uniform vec2 u_resolution;
+            uniform vec3 u_color_a; uniform vec3 u_color_b; uniform float u_speed; uniform float u_grain;
+            varying vec2 vUv;
+            float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+            void main(){
+                float aspect=u_resolution.x/u_resolution.y;
+                vec2 p=(vUv-0.5)*vec2(aspect,1.0);
+                // minutes-scale breath: warm center swells and recedes
+                float t=u_time*u_speed*0.05;
+                float breath=0.5+0.5*sin(t*6.28318);
+                // the gradient's focal point drifts in a slow lissajous
+                vec2 focus=vec2(sin(t*2.1)*0.25, cos(t*1.4)*0.2);
+                float d=length(p-focus);
+                float g=smoothstep(0.15+breath*0.55, 1.3-breath*0.25, d);
+                vec3 col=mix(u_color_b,u_color_a,clamp(g,0.0,1.0));
+                // hue shimmer: color B leans slightly warmer/cooler across the cycle
+                col+=vec3(0.02,-0.01,0.015)*sin(t*4.0)*(1.0-g);
+                // gentle top-to-bottom deepening so desktop icons sit on darker ground
+                col*=0.9+0.1*vUv.y;
+                // film grain
+                col+=(hash(vUv*u_resolution.xy+fract(u_time)*7.0)-0.5)*0.06*u_grain;
+                gl_FragColor=vec4(col,1.0);
+            }
+        `;
+
+        const material = new THREE.ShaderMaterial({ vertexShader, fragmentShader, uniforms });
+        scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material));
+
+        function applySettings(s){
+            if(s.color_a!==undefined) uniforms.u_color_a.value.set(s.color_a);
+            if(s.color_b!==undefined) uniforms.u_color_b.value.set(s.color_b);
+            if(s.cycle_speed!==undefined){ const r=parseFloat(s.cycle_speed)/100.0; uniforms.u_speed.value=0.08+Math.pow(r,1.5)*1.2; }
+            if(s.grain!==undefined) uniforms.u_grain.value=parseFloat(s.grain)/100.0;
+        }
+        const clock = new THREE.Clock();
+        window.wp = NovaframeWallpaper.createWallpaper({
+            fps: 30, pauseWhenHidden: true,
+            onResize: ({width,height}) => { renderer.setSize(width,height); uniforms.u_resolution.value.set(width,height); },
+            onFrame: () => { uniforms.u_time.value = clock.getElapsedTime(); renderer.render(scene,camera); },
+            onSettings: applySettings,
+        });
+        window.wp.start();
+        document.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'p') { renderer.render(scene,camera); const l=document.createElement('a'); l.download='preview.jpg'; l.href=renderer.domElement.toDataURL('image/jpeg',0.9); l.click(); }
+            if (e.key.toLowerCase() === 'r') { const st=renderer.domElement.captureStream(30); const mr=new MediaRecorder(st,{mimeType:'video/webm'}); const ch=[]; mr.ondataavailable=e=>ch.push(e.data); mr.onstop=()=>{const b=new Blob(ch,{type:'video/webm'});const l=document.createElement('a');l.download='preview.webm';l.href=URL.createObjectURL(b);l.click();}; mr.start(); setTimeout(()=>mr.stop(),5000); }
+        });
+        window.parent.postMessage({ type: 'novaframe-ready' }, '*');
+    </script>
+</body>
+</html>

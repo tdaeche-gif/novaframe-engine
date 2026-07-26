@@ -688,6 +688,63 @@ fn sync_shared_runtime(app: &tauri::AppHandle) {
     }
 }
 
+/// The theme every fresh install starts with.
+///
+/// Without this, a new user installs the engine and gets nothing — the desktop
+/// looks exactly as it did, and they have to buy something before they can see
+/// what they bought the engine for. Shipping one theme in the bundle turns the
+/// download into a working live wallpaper on first launch.
+///
+/// Provisioned once, guarded by a marker file (same pattern as the autostart
+/// default): a user who deletes this theme must not have it reappear on every
+/// restart. `sync_shared_runtime` runs before this in setup(), so the shared
+/// `../three.min.js` the theme loads is already in place one level up.
+const DEFAULT_THEME_DIR: &str = "breathing-gradient";
+const DEFAULT_THEME_FILES: [&str; 3] = ["index.html", "manifest.json", "novaframe-wallpaper.js"];
+
+fn provision_default_theme(app: &tauri::AppHandle) {
+    let app_data = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            dlog(app, &format!("[default-theme] no app_data_dir: {}", e));
+            return;
+        }
+    };
+
+    let marker = app_data.join(".default_theme_provisioned");
+    if marker.exists() {
+        return;
+    }
+
+    let dest_dir = app_data.join("themes").join(DEFAULT_THEME_DIR);
+    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+        dlog(app, &format!("[default-theme] create dir failed: {}", e));
+        return;
+    }
+
+    for name in DEFAULT_THEME_FILES {
+        let src = match app.path().resolve(
+            &format!("resources/default-theme/{}", name),
+            tauri::path::BaseDirectory::Resource,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                dlog(app, &format!("[default-theme] resolve {} failed: {}", name, e));
+                return;
+            }
+        };
+        if let Err(e) = std::fs::copy(&src, dest_dir.join(name)) {
+            dlog(app, &format!("[default-theme] copy {} failed: {}", name, e));
+            return;
+        }
+    }
+
+    // Only marked once every file landed, so a partial copy is retried next
+    // launch rather than leaving a broken theme the user can select.
+    let _ = std::fs::write(&marker, b"1");
+    dlog(app, &format!("[default-theme] provisioned {:?}", dest_dir));
+}
+
 /// Append a line to AppData/engine-debug.log. Release builds run as a Windows
 /// GUI-subsystem app with NO console, so println! is invisible in the field —
 /// this file is the only way to see what actually happened on a user's machine.
@@ -1145,6 +1202,12 @@ fn main() {
 
             // Ensure the shared three.js runtime is present before any theme loads.
             sync_shared_runtime(&handle);
+
+            // First run only: put one theme on the desktop so the engine does
+            // something the moment it opens. scanThemes() auto-selects the
+            // first available theme when none is active, so this needs no
+            // frontend change — it just has to exist before the scan.
+            provision_default_theme(&handle);
 
             // On Windows/Linux the novaframe:// scheme lives in the registry /
             // desktop files. The NSIS installer registers it, but re-assert at

@@ -1,0 +1,12 @@
+{
+    "theme_id": "breathing-gradient",
+    "name": "Breathing Gradient",
+    "version": "1.0.1",
+    "render_mode": "external-html",
+    "custom_settings": [
+        { "id": "color_a", "label": "Color A", "type": "color", "default": "#1a1e3c" },
+        { "id": "color_b", "label": "Color B", "type": "color", "default": "#c96f8e" },
+        { "id": "cycle_speed", "label": "Breath Speed", "type": "range", "min": 0, "max": 100, "default": 25 },
+        { "id": "grain", "label": "Film Grain", "type": "range", "min": 0, "max": 100, "default": 30 }
+    ]
+}
