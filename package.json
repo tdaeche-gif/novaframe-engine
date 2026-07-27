@@ -4,14 +4,21 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "build": "esbuild src/app.js --bundle --outfile=src/app.bundle.js --platform=browser --target=es2020 --format=esm",
+    "watch": "esbuild src/app.js --bundle --outfile=src/app.bundle.js --platform=browser --target=es2020 --format=esm --watch",
     "tauri": "tauri"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2"
+    "@tauri-apps/cli": "^2",
+    "esbuild": "^0.28.1"
   },
   "dependencies": {
     "@tauri-apps/plugin-fs": "^2.5.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-store": "^2.4.3",
     "@tauri-apps/plugin-updater": "^2.10.1"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
   }
 }

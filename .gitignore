@@ -35,3 +35,6 @@ themes/*/
 .env.*
 !.env.example
 *.dmg
+
+# esbuild output (generated from src/app.js)
+src/app.bundle.js

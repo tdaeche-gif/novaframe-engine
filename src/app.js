@@ -1,3 +1,15 @@
+// ── Tauri API imports ────────────────────────────────────────────────────────
+// withGlobalTauri is false — window.__TAURI__ is NOT injected. All Tauri APIs
+// must come from these imports. esbuild bundles this into src/app.bundle.js.
+import { invoke } from '@tauri-apps/api/core';
+import { emit, listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { readDir, remove } from '@tauri-apps/plugin-fs';
+import { Store } from '@tauri-apps/plugin-store';
+import { check as updaterCheck } from '@tauri-apps/plugin-updater';
+import { relaunch, exit as processExit } from '@tauri-apps/plugin-process';
+
+// ── Engine constants ──────────────────────────────────────────────────────────
 // Highest theme manifest_version this engine build knows how to render. A theme
 // may set `manifest_version` in its manifest; if it declares a higher version
 // than this, the engine can't guarantee correct rendering and skips it (prompting
@@ -15,7 +27,7 @@ function manifestNeedsNewerEngine(manifest) {
 // Helper to resolve the themes directory path in AppData dynamically
 async function getThemesDir() {
     try {
-        let themesDir = await window.__TAURI__.core.invoke('get_themes_dir');
+        let themesDir = await invoke('get_themes_dir');
         // Ensure no trailing slash
         if (themesDir.endsWith('/') || themesDir.endsWith('\\')) {
             themesDir = themesDir.slice(0, -1);
@@ -62,9 +74,7 @@ const IS_WINDOWS_WEBVIEW = typeof navigator !== 'undefined'
 // Rust hover-poll loop sees the cursor leave the window bounds mid-selection
 // and collapses the panel, yanking it out from under the open dropdown.
 function setPanelLocked(locked) {
-    if (window.__TAURI__?.core?.invoke) {
-        window.__TAURI__.core.invoke('set_settings_panel_locked', { locked }).catch(() => {});
-    }
+    invoke('set_settings_panel_locked', { locked }).catch(() => {});
 }
 
 // One delegated lock for EVERY control whose native popup can extend beyond
@@ -98,9 +108,6 @@ function initPanelLockDelegation() {
 
 // Check and provision default theme inside system AppData on startup
 async function verifyAndProvisionAppData() {
-    const tauriFs = window.__TAURI_PLUGIN_FS__ || (window.__TAURI__ && window.__TAURI__.fs);
-    if (!tauriFs) return;
-
     try {
         const themesDir = await getThemesDir();
 
@@ -109,10 +116,10 @@ async function verifyAndProvisionAppData() {
         // An empty folder appears in the dropdown but has no manifest → always falls back to Internal-Legacy.
         const mercatorPath = `${themesDir}/mercator-classic`;
         try {
-            const files = await tauriFs.readDir(mercatorPath);
+            const files = await readDir(mercatorPath);
             if (!files || files.length === 0) {
                 console.log("[Novaframe] Removing empty mercator-classic folder from AppData...");
-                await tauriFs.remove(mercatorPath, { recursive: true });
+                await remove(mercatorPath, { recursive: true });
             }
         } catch (e) {
             // Folder doesn't exist yet — that's fine
@@ -125,15 +132,13 @@ async function verifyAndProvisionAppData() {
 
 // Set ignore cursor events safely by checking label boundaries
 async function setIgnoreCursor(ignore) {
-    if (window.__TAURI__ && window.__TAURI__.window) {
-        try {
-            const win = window.__TAURI__.window.getCurrentWindow();
-            if (win.label === 'main') {
-                await win.setIgnoreCursorEvents(ignore);
-            }
-        } catch (e) {
-            console.error("[Novaframe] Failed to set ignore cursor events:", e);
+    try {
+        const win = getCurrentWindow();
+        if (win.label === 'main') {
+            await win.setIgnoreCursorEvents(ignore);
         }
+    } catch (e) {
+        console.error("[Novaframe] Failed to set ignore cursor events:", e);
     }
 }
 
@@ -306,7 +311,10 @@ const ThemeManager = {
         iframe.id = 'themeFrame';
         iframe.src = src;
         iframe.setAttribute('allow', 'autoplay; fullscreen');
-        iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups allow-forms');
+        // Security: no allow-same-origin — iframe origin becomes null, so
+        // wallpaper JS cannot access window.__TAURI__, parent DOM, or cookies.
+        // All communication goes through the postMessage bridge below.
+        iframe.setAttribute('sandbox', 'allow-scripts');
         Object.assign(iframe.style, {
             position: 'absolute',
             top: '0', left: '0',
@@ -405,8 +413,7 @@ let _lastKnownOccluded = false;
 async function pushCurrentOcclusion(iframe) {
     let occluded = _lastKnownOccluded;
     try {
-        const invoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
-        if (invoke) occluded = await invoke('get_wallpaper_paused');
+        occluded = await invoke('get_wallpaper_paused');
     } catch (e) {
         console.warn('[Novaframe] get_wallpaper_paused unavailable, using cached state', e);
     }
@@ -480,21 +487,8 @@ let config = DEFAULT_CONFIG;
 const ConfigManager = {
     store: null,
     async init() {
-        const tauriStore = window.__TAURI_PLUGIN_STORE__ || (window.__TAURI__ && window.__TAURI__.store);
-        if (!tauriStore) {
-            console.warn("[ConfigManager] Native store not available, using localStorage");
-            config = JSON.parse(localStorage.getItem('novaframe_config')) || DEFAULT_CONFIG;
-            return;
-        }
-        
         try {
-            if (tauriStore.load) {
-                this.store = await tauriStore.load("novaframe_config.json");
-            } else if (tauriStore.Store && tauriStore.Store.load) {
-                this.store = await tauriStore.Store.load("novaframe_config.json");
-            } else {
-                this.store = new tauriStore.Store("novaframe_config.json");
-            }
+            this.store = await Store.load("novaframe_config.json");
             
             // Migration Bridge
             const hasConfig = await this.store.has('novaframe_config');
@@ -555,12 +549,10 @@ const ConfigManager = {
         }
         localStorage.setItem('novaframe_config', JSON.stringify(config));
 
-        if (window.__TAURI__ && window.__TAURI__.event) {
-            try {
-                await window.__TAURI__.event.emit('config-changed', config);
-            } catch (e) {
-                console.error("[Novaframe] Config emit failed:", e);
-            }
+        try {
+            await emit('config-changed', config);
+        } catch (e) {
+            console.error("[Novaframe] Config emit failed:", e);
         }
     },
     async getTheme() {
@@ -598,14 +590,12 @@ const ConfigManager = {
             localStorage.removeItem('activeTheme');
         }
 
-        if (window.__TAURI__ && window.__TAURI__.event) {
-            try {
-                // Broadcast to all windows. The listener now dedupes against
-                // currentThemePath so echoes don't trigger re-renders.
-                await window.__TAURI__.event.emit('theme-changed', next);
-            } catch (e) {
-                console.error("[Novaframe] Theme emit failed:", e);
-            }
+        try {
+            // Broadcast to all windows. The listener now dedupes against
+            // currentThemePath so echoes don't trigger re-renders.
+            await emit('theme-changed', next);
+        } catch (e) {
+            console.error("[Novaframe] Theme emit failed:", e);
         }
     }
 };
@@ -749,16 +739,14 @@ function updateSettingsScope(themePath) {
                             ThemeManager.currentIframe.contentWindow.postMessage({
                                 type: 'novaframe-settings',
                                 settings: { [setting.id]: true }
-                            }, '*');
+                            }, window.location.origin);
                         }
                         
                         // Broadcast to other windows (specifically the background underlay window)
-                        if (window.__TAURI__ && window.__TAURI__.event) {
-                            try {
-                                await window.__TAURI__.event.emit('theme-action', setting.id);
-                            } catch (e) {
-                                console.error("[Novaframe] Theme action emit failed:", e);
-                            }
+                        try {
+                            await emit('theme-action', setting.id);
+                        } catch (e) {
+                            console.error("[Novaframe] Theme action emit failed:", e);
                         }
                     });
                     group.appendChild(btn);
@@ -864,13 +852,10 @@ async function initSettingsUI() {
             );
             if (!ok) return;
             try {
-                await window.__TAURI__.core.invoke('quit_engine');
+                await invoke('quit_engine');
             } catch (err) {
                 console.error('[Novaframe] quit_engine invoke failed, falling back to process.exit:', err);
-                const proc = window.__TAURI_PLUGIN_PROCESS__ || (window.__TAURI__ && window.__TAURI__.process);
-                if (proc && proc.exit) {
-                    await proc.exit(0);
-                }
+                try { await processExit(0); } catch (_) {}
             }
         });
     }
@@ -878,16 +863,16 @@ async function initSettingsUI() {
     // 5. Wire the "Launch on startup" toggle — reflects the real OS state and
     // writes changes through the Rust set_autostart command.
     const autostartToggle = document.getElementById('autostartToggle');
-    if (autostartToggle && window.__TAURI__?.core?.invoke) {
+    if (autostartToggle) {
         try {
-            autostartToggle.checked = await window.__TAURI__.core.invoke('get_autostart');
+            autostartToggle.checked = await invoke('get_autostart');
         } catch (err) {
             console.error('[Novaframe] get_autostart failed:', err);
         }
         autostartToggle.addEventListener('change', async (e) => {
             const enabled = e.target.checked;
             try {
-                await window.__TAURI__.core.invoke('set_autostart', { enabled });
+                await invoke('set_autostart', { enabled });
             } catch (err) {
                 console.error('[Novaframe] set_autostart failed:', err);
                 // Revert the UI if the OS call failed.
@@ -925,7 +910,7 @@ function initDeleteThemeButton() {
         if (!ok) return;
 
         try {
-            await window.__TAURI__.core.invoke('delete_theme', { name: dirName });
+            await invoke('delete_theme', { name: dirName });
         } catch (err) {
             console.error('[Novaframe] delete_theme failed:', err);
             alertInPanel(`Could not remove that wallpaper: ${err}`);
@@ -947,12 +932,12 @@ function initDeleteThemeButton() {
 // ── Pause on battery ───────────────────────────────────────────────────────
 function initBatterySaverToggle() {
     const toggle = document.getElementById('batterySaverToggle');
-    if (!toggle || !window.__TAURI__?.core?.invoke) return;
+    if (!toggle) return;
 
     toggle.checked = config.pause_on_battery === true;
     // Rust holds this in an atomic that resets on every launch, so push the
     // saved value back in at startup rather than waiting for a user change.
-    window.__TAURI__.core.invoke('set_battery_saver', { enabled: toggle.checked })
+    invoke('set_battery_saver', { enabled: toggle.checked })
         .catch(err => console.error('[Novaframe] set_battery_saver failed:', err));
 
     toggle.addEventListener('change', async (e) => {
@@ -960,7 +945,7 @@ function initBatterySaverToggle() {
         config.pause_on_battery = enabled;
         await ConfigManager.saveConfig();
         try {
-            await window.__TAURI__.core.invoke('set_battery_saver', { enabled });
+            await invoke('set_battery_saver', { enabled });
         } catch (err) {
             console.error('[Novaframe] set_battery_saver failed:', err);
         }
@@ -1037,7 +1022,7 @@ async function scanThemes() {
     
     selector.innerHTML = '<option value="" disabled selected>Select Wallpaper</option>';
     
-    const tauriFs = window.__TAURI_PLUGIN_FS__ || (window.__TAURI__ && window.__TAURI__.fs);
+    const tauriFs = { readDir };
     if (!tauriFs) return;
     
     try {
@@ -1123,8 +1108,7 @@ async function scanThemes() {
             // (container is display:none but the iframe still runs its WebGL
             // loop), doubling GPU/CPU cost. The main window picks the change up
             // via its store poll / theme-changed event.
-            const inSettingsWindow = window.__TAURI__
-                && window.location.search.includes('mode=settings');
+            const inSettingsWindow = window.location.search.includes('mode=settings');
             if (!inSettingsWindow) {
                 ThemeManager.loadTheme(targetTheme);
             }
@@ -1140,10 +1124,10 @@ async function scanThemes() {
     const refreshBtn = document.getElementById('refreshThemeBtn');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', async () => {
-            if (window.__TAURI__?.event) {
-                try { await window.__TAURI__.event.emit('theme-reload'); } catch (_) {}
-            } else if (ThemeManager.currentThemePath) {
-                ThemeManager.loadTheme(ThemeManager.currentThemePath, true);
+            try { await emit('theme-reload'); } catch (_) {
+                if (ThemeManager.currentThemePath) {
+                    ThemeManager.loadTheme(ThemeManager.currentThemePath, true);
+                }
             }
         });
     }
@@ -1151,11 +1135,9 @@ async function scanThemes() {
     const openStoreBtn = document.getElementById('openStoreBtn');
     if (openStoreBtn) {
         openStoreBtn.addEventListener('click', async () => {
-            if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
-                await window.__TAURI__.core.invoke('open_storefront_window');
-            } else {
-                console.error("Tauri invoke API not available.");
-            }
+            await invoke('open_storefront_window').catch(err =>
+                console.error("[Novaframe] open_storefront_window failed:", err)
+            );
         });
     }
 
@@ -1307,13 +1289,9 @@ function friendlyApiError(data) {
 let engineApplyListenerRegistered = false;
 function registerEngineApplyListener() {
     if (engineApplyListenerRegistered) return;
-    if (!(window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.listen)) {
-        console.error('[Main] window.__TAURI__.event.listen is NOT available. The deep-link event cannot be received.');
-        return;
-    }
     engineApplyListenerRegistered = true;
 
-    window.__TAURI__.event.listen('engine-apply-theme', async (event) => {
+    listen('engine-apply-theme', async (event) => {
         const TAG = '[Main]';
         const stamp = `[${Date.now() % 100000}]`;
         const token = event?.payload;
@@ -1326,7 +1304,7 @@ function registerEngineApplyListener() {
             // hardwareId as a legacy client and skips enforcement.
             let hardwareId = null;
             try {
-                hardwareId = await window.__TAURI__.core.invoke('get_hardware_id');
+                hardwareId = await invoke('get_hardware_id');
             } catch (hwErr) {
                 console.error(TAG, stamp, 'get_hardware_id failed:', hwErr);
             }
@@ -1354,7 +1332,7 @@ function registerEngineApplyListener() {
                     // Tauri v2 serializes Rust function arguments as camelCase on the
                     // JS side. Rust declares `theme_id` / `wallpaper_title` but the JS
                     // keys must be camelCase: `themeId` / `wallpaperTitle`.
-                    installedThemeId = await window.__TAURI__.core.invoke('download_and_install_theme', {
+                    installedThemeId = await invoke('download_and_install_theme', {
                         url: downloadUrl,
                         themeId: wallpaperId,
                         wallpaperTitle: wallpaperTitle
@@ -1400,13 +1378,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Surface uncaught JS errors to Rust logs (visible in `tauri dev` console)
     // so we don't need DevTools attached to diagnose runtime failures.
     const reportErr = (label, info) => {
-        try {
-            if (window.__TAURI__?.core?.invoke) {
-                window.__TAURI__.core.invoke('log_from_js', {
-                    message: `[${label}] ${info?.stack || info?.message || String(info)}`
-                });
-            }
-        } catch (_) {}
+        invoke('log_from_js', {
+            message: `[${label}] ${info?.stack || info?.message || String(info)}`
+        }).catch(() => {});
     };
     window.addEventListener('error', (e) => reportErr('window.error', e.error || e.message));
     window.addEventListener('unhandledrejection', (e) => reportErr('unhandledrejection', e.reason));
@@ -1425,146 +1399,137 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
-    if (window.__TAURI__) {
-        await verifyAndProvisionAppData();
-        await ConfigManager.init();
-        initDualWindowSystem();
+    await verifyAndProvisionAppData();
+    await ConfigManager.init();
+    initDualWindowSystem();
 
-        // Settings UI only exists in the settings (controls) window. Mounting
-        // it on the main window would render an unused overlay whose cog is
-        // also unreachable behind the wallpaper iframe.
-        const isSettingsWindow = window.location.search.includes('mode=settings');
-        if (isSettingsWindow) {
-            initSettingsUI();
-            // Exactly one window handles the deep-link download/install; the
-            // settings window is always alive (never destroyed/collapsed away)
-            // and is the one the marketplace deep link focuses. Registering in
-            // both windows would race the same install.
-            registerEngineApplyListener();
-        }
-
-        if (window.__TAURI__.event) {
-            // Inter-window event triggers
-            window.__TAURI__.event.listen('theme-changed', async (event) => {
-                const newTheme = event.payload || null;
-                const isMainWindow = window.location.search.includes('mode=main');
-
-                if (isMainWindow) {
-                    // Skip if theme hasn't actually changed — guards against
-                    // echo loops where the same window receives its own broadcast
-                    // back. ThemeManager.loadTheme has its own idempotency guard.
-                    if (newTheme === ThemeManager.currentThemePath) return;
-                    ThemeManager.loadTheme(newTheme);
-                } else {
-                    // Settings window: ALWAYS mirror the new state. Echoes are
-                    // cheap here because we never touch the iframe / canvases.
-                    ThemeManager.currentThemePath = newTheme;
-                    updateSettingsScope(newTheme);
-                }
-            });
-
-            // Refresh button in the settings panel: hard-remount the active
-            // theme's iframe (main window only — settings window has no mount).
-            window.__TAURI__.event.listen('theme-reload', () => {
-                const isMainWindow = window.location.search.includes('mode=main');
-                if (isMainWindow && ThemeManager.currentThemePath) {
-                    ThemeManager.loadTheme(ThemeManager.currentThemePath, true);
-                }
-            });
-
-            window.__TAURI__.event.listen('theme-installed', async (event) => {
-                const absoluteThemePath = event.payload;
-                console.log("[Novaframe] Received theme-installed event with path:", absoluteThemePath);
-                await ConfigManager.setTheme(absoluteThemePath);
-                // Main window: swap the theme in place — no full reload, so the
-                // fullscreen underlay never repaints bare HTML (was the source of
-                // the settings-panel flash). Settings window still reloads so
-                // scanThemes() re-runs and the dropdown picks up the new theme.
-                if (isSettingsWindow) {
-                    window.location.reload();
-                } else {
-                    ThemeManager.loadTheme(absoluteThemePath);
-                }
-            });
-
-            window.__TAURI__.event.listen('config-changed', (event) => {
-                if (event.payload) {
-                    config = event.payload;
-                    relayThemeSettingsToIframe();
-                }
-            });
-
-            window.__TAURI__.event.listen('theme-action', (event) => {
-                const settingId = event.payload;
-                if (settingId && ThemeManager.currentIframe?.contentWindow) {
-                    ThemeManager.currentIframe.contentWindow.postMessage({
-                        type: 'novaframe-settings',
-                        settings: { [settingId]: true }
-                    }, '*');
-                }
-            });
-
-            // Sleep Failsafe
-            // When the OS goes to sleep, the WebGL context in the iframe is often lost or frozen.
-            // A delta-time interval detects if the CPU actually slept (e.g. >5 seconds passed between 1s intervals).
-            // Main window only — the settings window never mounts an iframe,
-            // so its copy of this timer was pure waste.
-            //
-            // CAUTION: a late timer is NOT proof of sleep. This window lives under
-            // WorkerW and is never foreground, so the browser throttles its timers
-            // — a busy machine can overshoot 5s with no sleep involved. Each false
-            // positive reloads the theme, which re-creates the WebGL context and
-            // re-uploads its textures (iss-window decodes a 4096x2048 base64 Blue
-            // Marble and regenerates mipmaps). Two guards below:
-            //   1. Never reload while the wallpaper is paused — there is no live
-            //      context to rescue, and the reloaded theme would come back up
-            //      rendering. (`pushCurrentOcclusion` on load covers the case
-            //      where a reload does happen, but not reloading is cheaper.)
-            //   2. Raised threshold + a real log line, so a reload loop is
-            //      visible in the console instead of silent.
-            let lastTick = Date.now();
-            const SLEEP_GAP_MS = 20000;
-            if (!isSettingsWindow) setInterval(() => {
-                const now = Date.now();
-                const gap = now - lastTick;
-                if (gap > SLEEP_GAP_MS) {
-                    if (_lastKnownOccluded) {
-                        console.log(`[Novaframe] timer gap ${gap}ms while paused — skipping iframe reload`);
-                    } else if (ThemeManager.currentIframe) {
-                        console.log(`[Novaframe] timer gap ${gap}ms — reloading iframe to restore WebGL context`);
-                        // Force a hard reload of the iframe to obliterate the dead WebGL context
-                        const currentSrc = ThemeManager.currentIframe.src;
-                        ThemeManager.currentIframe.src = 'about:blank';
-                        setTimeout(() => {
-                            ThemeManager.currentIframe.src = currentSrc;
-                        }, 50);
-                    }
-                }
-                lastTick = now;
-            }, 1000);
-
-            window.__TAURI__.event.listen('occlusion-change', (event) => {
-                const isVisible = event.payload;
-                // Cache it so a theme mounted later can be told without a round
-                // trip, and so the sleep failsafe can skip pointless reloads.
-                _lastKnownOccluded = !isVisible;
-                // Broadcast to external themes so they can pause their render loops
-                if (ThemeManager.currentIframe?.contentWindow) {
-                    try {
-                        ThemeManager.currentIframe.contentWindow.postMessage({
-                            type: 'novaframe-occlusion',
-                            occluded: !isVisible
-                        }, '*');
-                    } catch (_) {}
-                }
-            });
-
-
-        }
-    } else {
-        await ConfigManager.init();
+    // Settings UI only exists in the settings (controls) window. Mounting
+    // it on the main window would render an unused overlay whose cog is
+    // also unreachable behind the wallpaper iframe.
+    const isSettingsWindow = window.location.search.includes('mode=settings');
+    if (isSettingsWindow) {
         initSettingsUI();
+        // Exactly one window handles the deep-link download/install; the
+        // settings window is always alive (never destroyed/collapsed away)
+        // and is the one the marketplace deep link focuses. Registering in
+        // both windows would race the same install.
+        registerEngineApplyListener();
     }
+
+    // Inter-window event triggers
+    listen('theme-changed', async (event) => {
+        const newTheme = event.payload || null;
+        const isMainWindow = window.location.search.includes('mode=main');
+
+        if (isMainWindow) {
+            // Skip if theme hasn't actually changed — guards against
+            // echo loops where the same window receives its own broadcast
+            // back. ThemeManager.loadTheme has its own idempotency guard.
+            if (newTheme === ThemeManager.currentThemePath) return;
+            ThemeManager.loadTheme(newTheme);
+        } else {
+            // Settings window: ALWAYS mirror the new state. Echoes are
+            // cheap here because we never touch the iframe / canvases.
+            ThemeManager.currentThemePath = newTheme;
+            updateSettingsScope(newTheme);
+        }
+    });
+
+    // Refresh button in the settings panel: hard-remount the active
+    // theme's iframe (main window only — settings window has no mount).
+    listen('theme-reload', () => {
+        const isMainWindow = window.location.search.includes('mode=main');
+        if (isMainWindow && ThemeManager.currentThemePath) {
+            ThemeManager.loadTheme(ThemeManager.currentThemePath, true);
+        }
+    });
+
+    listen('theme-installed', async (event) => {
+        const absoluteThemePath = event.payload;
+        console.log("[Novaframe] Received theme-installed event with path:", absoluteThemePath);
+        await ConfigManager.setTheme(absoluteThemePath);
+        // Main window: swap the theme in place — no full reload, so the
+        // fullscreen underlay never repaints bare HTML (was the source of
+        // the settings-panel flash). Settings window still reloads so
+        // scanThemes() re-runs and the dropdown picks up the new theme.
+        if (isSettingsWindow) {
+            window.location.reload();
+        } else {
+            ThemeManager.loadTheme(absoluteThemePath);
+        }
+    });
+
+    listen('config-changed', (event) => {
+        if (event.payload) {
+            config = event.payload;
+            relayThemeSettingsToIframe();
+        }
+    });
+
+    listen('theme-action', (event) => {
+        const settingId = event.payload;
+        if (settingId && ThemeManager.currentIframe?.contentWindow) {
+            ThemeManager.currentIframe.contentWindow.postMessage({
+                type: 'novaframe-settings',
+                settings: { [settingId]: true }
+            }, '*');
+        }
+    });
+
+    // Sleep Failsafe
+    // When the OS goes to sleep, the WebGL context in the iframe is often lost or frozen.
+    // A delta-time interval detects if the CPU actually slept (e.g. >5 seconds passed between 1s intervals).
+    // Main window only — the settings window never mounts an iframe,
+    // so its copy of this timer was pure waste.
+    //
+    // CAUTION: a late timer is NOT proof of sleep. This window lives under
+    // WorkerW and is never foreground, so the browser throttles its timers
+    // — a busy machine can overshoot 5s with no sleep involved. Each false
+    // positive reloads the theme, which re-creates the WebGL context and
+    // re-uploads its textures (iss-window decodes a 4096x2048 base64 Blue
+    // Marble and regenerates mipmaps). Two guards below:
+    //   1. Never reload while the wallpaper is paused — there is no live
+    //      context to rescue, and the reloaded theme would come back up
+    //      rendering. (`pushCurrentOcclusion` on load covers the case
+    //      where a reload does happen, but not reloading is cheaper.)
+    //   2. Raised threshold + a real log line, so a reload loop is
+    //      visible in the console instead of silent.
+    let lastTick = Date.now();
+    const SLEEP_GAP_MS = 20000;
+    if (!isSettingsWindow) setInterval(() => {
+        const now = Date.now();
+        const gap = now - lastTick;
+        if (gap > SLEEP_GAP_MS) {
+            if (_lastKnownOccluded) {
+                console.log(`[Novaframe] timer gap ${gap}ms while paused — skipping iframe reload`);
+            } else if (ThemeManager.currentIframe) {
+                console.log(`[Novaframe] timer gap ${gap}ms — reloading iframe to restore WebGL context`);
+                // Force a hard reload of the iframe to obliterate the dead WebGL context
+                const currentSrc = ThemeManager.currentIframe.src;
+                ThemeManager.currentIframe.src = 'about:blank';
+                setTimeout(() => {
+                    ThemeManager.currentIframe.src = currentSrc;
+                }, 50);
+            }
+        }
+        lastTick = now;
+    }, 1000);
+
+    listen('occlusion-change', (event) => {
+        const isVisible = event.payload;
+        // Cache it so a theme mounted later can be told without a round
+        // trip, and so the sleep failsafe can skip pointless reloads.
+        _lastKnownOccluded = !isVisible;
+        // Broadcast to external themes so they can pause their render loops
+        if (ThemeManager.currentIframe?.contentWindow) {
+            try {
+                ThemeManager.currentIframe.contentWindow.postMessage({
+                    type: 'novaframe-occlusion',
+                    occluded: !isVisible
+                }, '*');
+            } catch (_) {}
+        }
+    });
 });
 
 
@@ -1575,12 +1540,7 @@ const updateRestartBanner = document.getElementById('updateRestartBanner');
 const updateRestartBtn = document.getElementById('updateRestartBtn');
 
 async function relaunchApp() {
-    const proc = window.__TAURI_PLUGIN_PROCESS__ || (window.__TAURI__ && window.__TAURI__.process);
-    if (proc && proc.relaunch) {
-        await proc.relaunch();
-    } else {
-        console.error('[Updater] process.relaunch not available');
-    }
+    await relaunch();
 }
 
 // Shared check/download/install. silent=true: no status text unless an update
@@ -1596,19 +1556,13 @@ async function checkAndInstallUpdate({ silent }) {
         if (color) updateStatus.style.color = color;
     };
 
-    const updater = window.__TAURI_PLUGIN_UPDATER__ || (window.__TAURI__ && window.__TAURI__.updater);
-    if (!updater) {
-        setStatus('Updater not available in this build.', '#ef4444');
-        return;
-    }
-
     if (updateInstalledPendingRestart) {
         // Already downloaded and installed this session — just needs a restart.
         setStatus('Update ready — restart to apply.', '#10b981');
         return;
     }
 
-    const update = await updater.check();
+    const update = await updaterCheck();
     if (!update) {
         setStatus('You are on the latest version.', '#10b981');
         return;
