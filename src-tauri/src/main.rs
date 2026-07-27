@@ -1103,19 +1103,18 @@ fn build_tray(app: &tauri::AppHandle) {
     }
 }
 
-/// True when a fullscreen game / video / presentation is in the foreground, so
-/// the wallpaper render should be paused to free the GPU.
 /// True when macOS considers the wallpaper window hidden behind other windows.
 ///
-/// The macOS counterpart to `desktop_is_covered()` on Windows, and much cheaper
-/// than it: the WindowServer already tracks this per window and exposes it as
-/// `NSWindow.occlusionState`, so there's no window enumeration or region math —
-/// a maximized or full-screen app clears the `visible` bit for us.
-///
-/// Until this existed, nothing on macOS ever paused the render: the Windows
-/// coverage poll is `#[cfg(target_os = "windows")]`, so a shader kept running
-/// at full rate behind every full-screen window, which on a laptop is a
-/// straight tax on the battery.
+/// NOTE: For a window at `kCGDesktopWindowLevel - 1` (the desktop underlay
+/// level used by tauri-plugin-desktop-underlay), the WindowServer does NOT
+/// compute a meaningful occlusion state. `occlusionState` always reports
+/// `Visible` regardless of what covers the screen. The comment that used to
+/// live here — "a maximized or full-screen app clears the visible bit for us"
+/// — described behaviour that does NOT happen for this window class and is
+/// therefore always false in practice. The function is kept because it costs
+/// nothing and becomes meaningful if Apple ever extends occlusion tracking
+/// to desktop-level windows. Fullscreen-app pausing is handled separately
+/// by `is_fullscreen_app_active()` (macOS arm).
 #[cfg(target_os = "macos")]
 fn macos_window_occluded(window: &tauri::WebviewWindow) -> bool {
     use objc2::runtime::AnyObject;
@@ -1134,6 +1133,79 @@ fn macos_window_occluded(window: &tauri::WebviewWindow) -> bool {
     let ns_window: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
     let state = ns_window.occlusionState();
     !state.contains(NSWindowOcclusionState::Visible)
+}
+
+/// True when the user permanently hides both the Dock and the menu bar, which
+/// makes the `visibleFrame == frame` fullscreen test useless for them.
+///
+/// Read once at startup and cached: these are user preferences, not ephemeral
+/// state, and shelling out on every poll would be its own battery drain.
+/// The pattern matches `running_on_battery()`, which shells out to `/usr/bin/pmset`
+/// for the same reason.
+///
+/// Note `&&` (not `||`): hiding only the Dock still leaves the menu-bar inset,
+/// so the test remains valid; only hiding *both* defeats it.
+#[cfg(target_os = "macos")]
+fn chrome_always_hidden() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let read_bool = |domain: &str, key: &str| -> bool {
+            std::process::Command::new("/usr/bin/defaults")
+                .args(["read", domain, key])
+                .output()
+                .ok()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "1")
+                .unwrap_or(false)
+        };
+        let dock_hidden = read_bool("com.apple.dock", "autohide");
+        let menu_hidden = read_bool("NSGlobalDomain", "_HIHideMenuBar");
+        dock_hidden && menu_hidden
+    })
+}
+
+/// True when a fullscreen app (video, game, presentation) owns the screen, so
+/// the wallpaper render can be paused to free the GPU.
+///
+/// macOS gives us no usable direct signal here. `NSWindow.occlusionState` is
+/// not tracked for a window at desktop level (see `macos_window_occluded` doc),
+/// and `isOnActiveSpace` is always true because the underlay plugin sets
+/// `canJoinAllSpaces`. What a fullscreen space *does* change is the menu bar
+/// and Dock: both hide, so `NSScreen.visibleFrame` grows to meet `frame`.
+///
+/// Deliberately misses merely *maximized* windows that don't enter a fullscreen
+/// space. The full fix is a CGWindowList coverage check mirroring the Windows
+/// `desktop_is_covered()`; that needs a new dependency and is deferred.
+///
+/// Guard: a user who permanently auto-hides *both* the Dock and the menu bar
+/// satisfies `visibleFrame == frame` at all times, so `chrome_always_hidden()`
+/// is checked first and returns false for them to avoid pausing forever.
+#[cfg(target_os = "macos")]
+fn is_fullscreen_app_active() -> bool {
+    // Guard: if the user permanently hides both chrome elements, visibleFrame
+    // always equals frame and the test below is a false positive forever.
+    if chrome_always_hidden() {
+        return false;
+    }
+
+    // Use raw msg_send! to avoid requiring the NSScreen typed-wrapper feature
+    // in Cargo.toml — this matches the pattern used elsewhere in this file.
+    unsafe {
+        let ns_screen_class = objc2::class!(NSScreen);
+        // +mainScreen can return nil if there is no screen (rare: headless CI).
+        let main_screen: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![ns_screen_class, mainScreen];
+        if main_screen.is_null() {
+            return false;
+        }
+
+        let frame: objc2_foundation::NSRect = objc2::msg_send![main_screen, frame];
+        let visible: objc2_foundation::NSRect = objc2::msg_send![main_screen, visibleFrame];
+
+        // Tolerance, not equality: visibleFrame can differ by a fraction of a
+        // point due to rounding on scaled (Retina) displays.
+        (frame.size.height - visible.size.height).abs() < 1.0
+            && (frame.size.width - visible.size.width).abs() < 1.0
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1431,36 +1503,67 @@ fn main() {
                 });
             }
 
-            // macOS: poll the wallpaper window's own occlusion state. Must run
-            // on the main thread — AppKit's occlusionState is not safe to read
-            // from a spawned thread — so this rides the app's own event loop
-            // via run_on_main_thread instead of a std::thread like the Windows
-            // poll above.
+            // macOS: poll the wallpaper window's occlusion state AND the
+            // fullscreen-app heuristic. Both must run on the main thread —
+            // AppKit is not thread-safe — so they ride the app's own event loop
+            // via run_on_main_thread instead of a std::thread like Windows.
+            //
+            // The occlusion poll (macos_window_occluded) is kept because it
+            // costs nothing and will become useful if Apple ever tracks windows
+            // at desktop level. Today it always returns false; see its doc.
+            //
+            // The fullscreen poll (is_fullscreen_app_active) detects native
+            // fullscreen spaces via the visibleFrame == frame heuristic.
             #[cfg(target_os = "macos")]
             {
+                // Log once at startup if the auto-hide guard is active, so a
+                // support conversation can immediately see why pausing never fires.
+                if chrome_always_hidden() {
+                    dlog(&handle, "[pause] macOS: Dock and menu bar both permanently hidden; \
+                        fullscreen heuristic disabled (visibleFrame guard)");
+                }
+
                 let occ_handle = handle.clone();
                 std::thread::spawn(move || {
-                    let last = std::sync::Arc::new(AtomicBool::new(false));
-                    let logged_first = std::sync::Arc::new(AtomicBool::new(false));
+                    let last_occ = std::sync::Arc::new(AtomicBool::new(false));
+                    let logged_first_occ = std::sync::Arc::new(AtomicBool::new(false));
+                    let last_fs = std::sync::Arc::new(AtomicBool::new(false));
+                    let logged_first_fs = std::sync::Arc::new(AtomicBool::new(false));
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(1000));
-                        let logged_first = logged_first.clone();
+                        let logged_first_occ = logged_first_occ.clone();
+                        let logged_first_fs = logged_first_fs.clone();
                         let h = occ_handle.clone();
-                        let last = last.clone();
+                        let last_occ = last_occ.clone();
+                        let last_fs = last_fs.clone();
                         let _ = occ_handle.run_on_main_thread(move || {
                             if let Some(w) = h.get_webview_window("main") {
+                                // ── Occlusion state (currently always false for
+                                //    desktop-level windows; kept for future use) ──
                                 let occluded = macos_window_occluded(&w);
                                 // First reading goes in the log unconditionally,
                                 // so the log distinguishes "poll never ran" from
                                 // "state never changed".
-                                if !logged_first.swap(true, Ordering::Relaxed) {
+                                if !logged_first_occ.swap(true, Ordering::Relaxed) {
                                     dlog(&h, &format!("[pause] macOS occlusion poll started, occluded={}", occluded));
                                 }
-                                if occluded != last.load(Ordering::Relaxed) {
-                                    last.store(occluded, Ordering::Relaxed);
+                                if occluded != last_occ.load(Ordering::Relaxed) {
+                                    last_occ.store(occluded, Ordering::Relaxed);
                                     WINDOW_OCCLUDED.store(occluded, Ordering::Relaxed);
                                     recompute_wallpaper_visibility(&h);
                                     dlog(&h, &format!("[pause] macOS window occluded={}", occluded));
+                                }
+
+                                // ── Fullscreen-app heuristic (visibleFrame ≈ frame) ──
+                                let fullscreen = is_fullscreen_app_active();
+                                if !logged_first_fs.swap(true, Ordering::Relaxed) {
+                                    dlog(&h, &format!("[pause] macOS fullscreen poll started, fullscreen={}", fullscreen));
+                                }
+                                if fullscreen != last_fs.load(Ordering::Relaxed) {
+                                    last_fs.store(fullscreen, Ordering::Relaxed);
+                                    FULLSCREEN_ACTIVE.store(fullscreen, Ordering::Relaxed);
+                                    recompute_wallpaper_visibility(&h);
+                                    dlog(&h, &format!("[pause] macOS fullscreen app active={}", fullscreen));
                                 }
                             }
                         });
@@ -1611,36 +1714,6 @@ fn main() {
                     });
                 }
 
-                #[cfg(target_os = "macos")]
-                {
-                    let main_window_clone = window.clone();
-                    let occ_handle = handle.clone();
-                    std::thread::spawn(move || {
-                        let mut last_visible = true;
-                        loop {
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            if let Ok(ns_window_ptr) = main_window_clone.ns_window() {
-                                if ns_window_ptr.is_null() {
-                                    continue;
-                                }
-                                unsafe {
-                                    let ns_window = ns_window_ptr as *mut objc2::runtime::AnyObject;
-                                    let state: usize = objc2::msg_send![ns_window, occlusionState];
-                                    let is_visible = (state & 2) != 0; // NSWindowOcclusionStateVisible is 1 << 1 (2)
-                                    if is_visible != last_visible {
-                                        last_visible = is_visible;
-                                        // Feed the pause coordinator instead of
-                                        // emitting directly, so a manual (tray)
-                                        // pause isn't overridden when occlusion
-                                        // toggles back to visible.
-                                        WINDOW_OCCLUDED.store(!is_visible, Ordering::Relaxed);
-                                        recompute_wallpaper_visibility(&occ_handle);
-                                    }
-                                }
-                            }
-                        }
-                    });
-                }
             }
 
             if let Some(settings_window) = app.get_webview_window("settings") {
@@ -1667,7 +1740,7 @@ fn main() {
                     std::thread::spawn(move || {
                         let mut was_hovered = false;
                         loop {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            std::thread::sleep(std::time::Duration::from_millis(150));
 
                             if SETTINGS_PANEL_LOCKED.load(Ordering::Relaxed) {
                                 if !was_hovered {
@@ -1716,7 +1789,7 @@ fn main() {
                     std::thread::spawn(move || {
                         let mut was_hovered = false;
                         loop {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            std::thread::sleep(std::time::Duration::from_millis(150));
 
                             if SETTINGS_PANEL_LOCKED.load(Ordering::Relaxed) {
                                 if !was_hovered {
