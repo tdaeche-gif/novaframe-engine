@@ -379,7 +379,20 @@ function updateSettingsScope(themePath) {
                 input.type = setting.type || 'text';
                 
                 if (setting.type === 'checkbox') {
-                    group.classList.add('control-row');
+                    label.remove(); // label is integrated inside toggleLabel below
+                    const toggleLabel = document.createElement('label');
+                    toggleLabel.className = 'toggle-row';
+                    toggleLabel.htmlFor = `custom_setting_${setting.id}`;
+
+                    const labelText = document.createElement('span');
+                    labelText.textContent = setting.label || setting.id;
+
+                    const toggleTrack = document.createElement('span');
+                    toggleTrack.className = 'toggle-track';
+                    const toggleThumb = document.createElement('span');
+                    toggleThumb.className = 'toggle-thumb';
+                    toggleTrack.appendChild(toggleThumb);
+
                     const savedVal = config.theme_settings[themePath][setting.id];
                     input.checked = savedVal !== undefined ? savedVal : (setting.default ?? false);
 
@@ -399,6 +412,14 @@ function updateSettingsScope(themePath) {
                             }, '*');
                         }
                     });
+
+                    toggleLabel.appendChild(labelText);
+                    toggleLabel.appendChild(input);
+                    toggleLabel.appendChild(toggleTrack);
+
+                    group.appendChild(toggleLabel);
+                    customSettingsSection.appendChild(group);
+                    return;
                 } else {
                     if (setting.type === 'range') {
                         if (setting.min !== undefined) input.min = setting.min;
