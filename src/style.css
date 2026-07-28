@@ -268,8 +268,8 @@ html[data-mode="settings"] #container { display: none; }
 #settingsPanel hr, #settingsPanel .header-hr, #settingsPanel .section-divider {
     border: 0;
     height: 1px;
-    background: linear-gradient(to right, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02));
-    margin: 12px 0 10px 0;
+    background: rgba(255, 255, 255, 0.08);
+    margin: 12px 0;
     width: 100%;
 }
 #settingsPanel .header-hr {
@@ -279,6 +279,14 @@ html[data-mode="settings"] #container { display: none; }
     margin-bottom: 0;
     width: 100%;
     box-sizing: border-box;
+}
+.system-toggles-group {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.system-toggles-group .toggle-row {
+    margin-top: 0 !important;
 }
 .control-group label {
     display: block;

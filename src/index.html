@@ -107,15 +107,14 @@
 
             <hr class="section-divider" />
 
-            <!-- Rotation: cycle through everything installed, so a library of
-                 wallpapers is worth more than the one you happened to pick. -->
-            <div class="control-group">
+            <!-- System Toggles Section -->
+            <div class="control-group system-toggles-group">
                 <label class="toggle-row" for="rotationToggle">
                     <span>Rotate wallpapers</span>
                     <input type="checkbox" id="rotationToggle">
                     <span class="toggle-track"><span class="toggle-thumb"></span></span>
                 </label>
-                <div id="rotationIntervalRow" style="display:none; margin-top:10px;">
+                <div id="rotationIntervalRow" style="display:none; margin-top:8px;">
                     <label for="rotationInterval">Change every</label>
                     <select id="rotationInterval" style="width:100%; height:36px; box-sizing:border-box;">
                         <option value="15">15 minutes</option>
@@ -124,16 +123,12 @@
                         <option value="1440">Day</option>
                     </select>
                 </div>
-            </div>
-
-            <hr class="section-divider" />
-            <div class="control-group">
                 <label class="toggle-row" for="autostartToggle">
                     <span>Launch on startup</span>
                     <input type="checkbox" id="autostartToggle">
                     <span class="toggle-track"><span class="toggle-thumb"></span></span>
                 </label>
-                <label class="toggle-row" for="batterySaverToggle" style="margin-top:10px;">
+                <label class="toggle-row" for="batterySaverToggle">
                     <span>Pause on battery</span>
                     <input type="checkbox" id="batterySaverToggle">
                     <span class="toggle-track"><span class="toggle-thumb"></span></span>
@@ -141,6 +136,7 @@
             </div>
 
             <hr class="section-divider" />
+
             <div class="control-group">
                 <button id="updateBtn" class="btn-secondary" style="width: 100%;">
                     Check for Updates
