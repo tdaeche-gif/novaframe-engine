@@ -1443,6 +1443,13 @@ fn desktop_is_covered() -> bool {
     })
 }
 
+fn decode_deeplink_token(raw_token: &str) -> Option<String> {
+    percent_encoding::percent_decode_str(raw_token)
+        .decode_utf8()
+        .ok()
+        .map(|s| s.into_owned())
+}
+
 fn process_deeplink_url(app: &tauri::AppHandle, url_str: &str) {
     dlog(app, &format!("[deeplink] received: {}", url_str));
     if url_str.starts_with("novaframe://apply") {
@@ -1456,9 +1463,9 @@ fn process_deeplink_url(app: &tauri::AppHandle, url_str: &str) {
                 .find(|p| p.starts_with("token="))
                 .and_then(|p| p.strip_prefix("token="));
 
-            match raw_token.and_then(|v| urlencoding::decode(v).ok()) {
-                Some(decoded_token) => {
-                    let token_str = decoded_token.into_owned();
+            let decoded_res = raw_token.and_then(decode_deeplink_token);
+            match decoded_res {
+                Some(token_str) => {
                     dlog(app, &format!("[deeplink] emitting engine-apply-theme token_len={}", token_str.len()));
                     let target_win = app.get_webview_window("settings");
                     let res = match target_win {
@@ -1961,5 +1968,16 @@ mod tests {
         for good in ["breathing-gradient", "Lightning Storm", "Serif Monogram Initials", "deep-space"] {
             assert!(is_safe_theme_name(good), "should accept {:?}", good);
         }
+    }
+
+    #[test]
+    fn test_deeplink_token_decoding_preserves_plus_slashes_and_equals() {
+        use super::decode_deeplink_token;
+        let token = "eyJhbGciOiJIUzI1NiJ9+test/token==";
+        let decoded = decode_deeplink_token(token);
+        assert_eq!(decoded, Some("eyJhbGciOiJIUzI1NiJ9+test/token==").map(String::from));
+
+        let encoded_plus = "hello%2Bworld";
+        assert_eq!(decode_deeplink_token(encoded_plus), Some("hello+world").map(String::from));
     }
 }
