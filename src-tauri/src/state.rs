@@ -17,6 +17,9 @@ pub static WINDOW_OCCLUDED: AtomicBool = AtomicBool::new(false);
 pub static ON_BATTERY: AtomicBool = AtomicBool::new(false);
 pub static BATTERY_SAVER_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Signal set to true when the app is shutting down, allowing background threads to exit.
+pub static SHUTDOWN_SIGNAL: AtomicBool = AtomicBool::new(false);
+
 pub fn recompute_wallpaper_visibility(app: &tauri::AppHandle) {
     let paused = MANUAL_PAUSE.load(Ordering::Relaxed)
         || FULLSCREEN_ACTIVE.load(Ordering::Relaxed)

@@ -6,6 +6,9 @@ export function getMode() {
     if (typeof window !== 'undefined') {
         const queryMode = new URLSearchParams(window.location.search).get('mode');
         if (queryMode) return queryMode;
+        if (document.documentElement?.dataset?.mode) {
+            return document.documentElement.dataset.mode;
+        }
         if (window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label) {
             return window.__TAURI_INTERNALS__.metadata.currentWindow.label;
         }

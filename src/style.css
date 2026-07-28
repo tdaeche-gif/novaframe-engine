@@ -61,6 +61,7 @@ canvas {
    on the initial render. */
 html[data-mode="main"] #settingsPanel { display: none; }
 html[data-mode="settings"] #container { display: none; }
+html[data-mode="settings"] #welcomeOverlay { display: none !important; }
 
 #settingsPanel {
     position: absolute;
@@ -200,6 +201,8 @@ html[data-mode="settings"] #container { display: none; }
 
 .panel-header {
     display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
     align-items: center;
     justify-content: space-between;
     width: 100%;
@@ -209,6 +212,8 @@ html[data-mode="settings"] #container { display: none; }
 
 .header-brand {
     display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
     align-items: center;
     gap: 8px;
     min-width: 0;
@@ -220,6 +225,7 @@ html[data-mode="settings"] #container { display: none; }
     height: 22px;
     border-radius: 5px;
     flex-shrink: 0;
+    object-fit: contain;
 }
 
 /* Red exit button, top-right of the panel header. Lets the user fully close

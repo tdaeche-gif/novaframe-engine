@@ -7,6 +7,7 @@ mod theme_protocol;
 mod power;
 mod installer;
 mod deeplink;
+mod window;
 
 use state::*;
 use tauri::Manager;
@@ -57,89 +58,7 @@ fn set_settings_panel_locked(locked: bool) {
 /// — reported as the cog "floating" a few px off the right side on macOS
 /// Retina displays. Computing entirely in physical pixels and rounding once,
 /// right before the set_size/set_position calls, removes that drift.
-fn place_settings_window(
-    window: &tauri::WebviewWindow,
-    monitor: &tauri::window::Monitor,
-    logical_width: f64,
-    logical_height: f64,
-) {
-    let scale_factor = monitor.scale_factor();
-    let target_w = (logical_width * scale_factor).round() as u32;
-    let target_h = (logical_height * scale_factor).round() as u32;
 
-    let mon_pos = monitor.position();
-    let mon_size = monitor.size();
-
-    let x = mon_pos.x + mon_size.width as i32 - target_w as i32;
-    let y = mon_pos.y + (mon_size.height as i32 - target_h as i32) / 2;
-
-    // Idempotence: skip when the CLIENT (webview) area is already exactly at
-    // the target rect. Poll threads (monitor poll, hover poll) route through
-    // here; redundant set_size/set_position calls trigger repaints on Windows
-    // that show as a periodic flicker.
-    if let (Ok(ip), Ok(is)) = (window.inner_position(), window.inner_size()) {
-        if ip.x == x && ip.y == y && is.width == target_w && is.height == target_h {
-            return;
-        }
-    }
-
-    let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-        target_w, target_h,
-    )));
-    let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-        x, y,
-    )));
-
-    // Windows: borderless windows still carry an invisible DWM resize frame,
-    // so the client (webview) area sits a few px INSIDE the outer rect we just
-    // set — the cog rendered clipped off the screen's right edge with dead
-    // transparent space above/below it. Same correction the main window does
-    // in adjust_window_layouts: measure the frame insets, grow the outer rect
-    // by the frame and shift it so the CLIENT lands exactly on the target.
-    #[cfg(target_os = "windows")]
-    if let (Ok(inner), Ok(outer_pos), Ok(outer_size), Ok(inner_size)) = (
-        window.inner_position(),
-        window.outer_position(),
-        window.outer_size(),
-        window.inner_size(),
-    ) {
-        let dx = inner.x - outer_pos.x;
-        let dy = inner.y - outer_pos.y;
-        let frame_w = outer_size.width.saturating_sub(inner_size.width);
-        let frame_h = outer_size.height.saturating_sub(inner_size.height);
-        if dx != 0 || dy != 0 || frame_w != 0 || frame_h != 0 {
-            let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-                target_w + frame_w,
-                target_h + frame_h,
-            )));
-            let _ = window.set_position(tauri::Position::Physical(
-                tauri::PhysicalPosition::new(x - dx, y - dy),
-            ));
-        }
-    }
-}
-
-#[tauri::command]
-fn expand_settings_panel(window: tauri::WebviewWindow) {
-    if let Ok(Some(monitor)) = window.current_monitor() {
-        place_settings_window(&window, &monitor, 360.0, 650.0); // 320 panel + 40 cog tab
-    }
-    let _ = window.set_focus();
-}
-
-#[tauri::command]
-fn collapse_settings_panel(window: tauri::WebviewWindow) {
-    if let Ok(Some(monitor)) = window.current_monitor() {
-        // Collapsed window is sized to just the cog on every platform so the
-        // hover-to-expand target is ONLY the visible settings icon — not the
-        // full-height column above/below it. (Windows also needs this so the
-        // WebView2/DWM layered-window outline can't draw a faint 600px-tall
-        // border down the right edge.) The cog is vertically centered in both
-        // the collapsed and expanded windows, so it stays at the same screen Y
-        // across the transition.
-        place_settings_window(&window, &monitor, COLLAPSED_WIDTH, COLLAPSED_HEIGHT);
-    }
-}
 
 #[tauri::command]
 fn log_from_js(app: tauri::AppHandle, message: String) {
@@ -171,43 +90,7 @@ fn quit_engine(app: tauri::AppHandle) {
 // commands run off the main loop and Tauri dispatches the actual window
 // creation to the main thread itself, which is also why this stays correct
 // on macOS.
-#[tauri::command]
-async fn open_storefront_window(app: tauri::AppHandle) -> Result<(), String> {
-    // Already open (or a previous session left it around): just focus it.
-    if let Some(window) = app.get_webview_window("storefront") {
-        window.show().map_err(|e| e.to_string())?;
-        window.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
-    }
 
-    // Lazily create the storefront. It used to be declared in tauri.conf.json,
-    // so Tauri built its WebView2 at startup and the hidden marketplace page ran
-    // continuously in the background (~20% CPU on Windows). Now it only exists
-    // while the user has the store open; closing it (decorated window → X)
-    // destroys the webview and frees the cost. Reopening rebuilds it.
-    let url = tauri::WebviewUrl::External(
-        "https://www.novaframe.co.uk/explore?source=engine"
-            .parse()
-            .map_err(|_| "invalid storefront url".to_string())?,
-    );
-    let app_handle = app.clone();
-    tauri::WebviewWindowBuilder::new(&app, "storefront", url)
-        .title("Novaframe Marketplace")
-        .inner_size(1280.0, 800.0)
-        .resizable(true)
-        .decorations(true)
-        .on_navigation(move |nav_url| {
-            let s = nav_url.as_str();
-            if s.starts_with("novaframe://") {
-                deeplink::process_deeplink_url(&app_handle, s);
-                return false;
-            }
-            true
-        })
-        .build()
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
 /// The theme every fresh install starts with.
 
 /// The theme every fresh install starts with.
@@ -290,164 +173,9 @@ pub(crate) fn dlog(app: &tauri::AppHandle, msg: &str) {
     }
 }
 
-fn adjust_window_layouts(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        if let Ok(Some(monitor)) = window.current_monitor() {
-            let scale_factor = monitor.scale_factor();
 
-            dlog(app, &format!(
-                "[layout] monitor name={:?} phys_size={:?} phys_pos={:?} scale={}",
-                monitor.name(), monitor.size(), monitor.position(), scale_factor
-            ));
 
-            // Windows: pass the monitor's raw physical bounds straight through.
-            // Converting to logical and back introduces sub-pixel rounding that
-            // leaves a ~1px gap on the screen edge (desktop shows through). macOS
-            // (retina) sizes correctly via logical coords, so keep that path.
-            #[cfg(target_os = "windows")]
-            {
-                let mon_size = *monitor.size();
-                let mon_pos = *monitor.position();
 
-                // Borderless Windows windows still carry an invisible DWM resize
-                // frame, so the client (webview) area sits ~8px INSIDE the outer
-                // rect. Measure the current frame insets (they're constant across
-                // resizes) and compute the ONE outer rect whose CLIENT covers the
-                // monitor exactly. Previously this set the raw monitor rect first
-                // and then re-set the corrected rect — a visible double-resize —
-                // and the monitor-poll safety net re-ran it every pass with no
-                // "already correct" check, producing a flicker every few seconds.
-                let (dx, dy, frame_w, frame_h) = match (
-                    window.inner_position(),
-                    window.outer_position(),
-                    window.outer_size(),
-                    window.inner_size(),
-                ) {
-                    (Ok(inner), Ok(outer_pos), Ok(outer_size), Ok(inner_size)) => (
-                        inner.x - outer_pos.x,
-                        inner.y - outer_pos.y,
-                        outer_size.width.saturating_sub(inner_size.width),
-                        outer_size.height.saturating_sub(inner_size.height),
-                    ),
-                    _ => (0, 0, 0, 0),
-                };
-                let want_w = mon_size.width + frame_w;
-                let want_h = mon_size.height + frame_h;
-                let want_x = mon_pos.x - dx;
-                let want_y = mon_pos.y - dy;
-
-                let already_placed = match (window.outer_position(), window.outer_size()) {
-                    (Ok(p), Ok(s)) => {
-                        p.x == want_x && p.y == want_y && s.width == want_w && s.height == want_h
-                    }
-                    _ => false,
-                };
-                if !already_placed {
-                    let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
-                        want_w, want_h,
-                    )));
-                    let _ = window.set_position(tauri::Position::Physical(
-                        tauri::PhysicalPosition::new(want_x, want_y),
-                    ));
-                    dlog(app, &format!(
-                        "[layout] frame inset dx={} dy={} frame_w={} frame_h={} -> client aligned to monitor origin",
-                        dx, dy, frame_w, frame_h
-                    ));
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let logical_size = monitor.size().to_logical::<f64>(scale_factor);
-                let logical_pos = monitor.position().to_logical::<f64>(scale_factor);
-                let _ = window.set_size(tauri::Size::Logical(logical_size));
-                let _ = window.set_position(tauri::Position::Logical(logical_pos));
-            }
-
-            dlog(app, &format!(
-                "[layout] main AFTER set: outer_pos={:?} outer_size={:?} inner_pos={:?} inner_size={:?}",
-                window.outer_position(), window.outer_size(), window.inner_position(), window.inner_size()
-            ));
-
-            if let Some(settings_window) = app.get_webview_window("settings") {
-                let current_width = if let Ok(size) = settings_window.inner_size() {
-                    size.to_logical::<f64>(scale_factor).width
-                } else {
-                    25.0
-                };
-                // Mirror expand_settings_panel / collapse_settings_panel exactly
-                // (same helper, same physical-pixel math — see
-                // place_settings_window for why logical math was dropped).
-                let expanded = current_width > 150.0;
-                let target_width = if expanded { 360.0 } else { COLLAPSED_WIDTH };
-                let target_height = if expanded { 650.0 } else { COLLAPSED_HEIGHT };
-                place_settings_window(&settings_window, &monitor, target_width, target_height);
-            }
-        }
-    }
-}
-
-/// Build the system-tray icon + menu (Show Settings / Pause / Quit). Best-effort:
-/// logs and returns on failure rather than aborting startup.
-fn build_tray(app: &tauri::AppHandle) {
-    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-    use tauri::tray::TrayIconBuilder;
-
-    let show = match MenuItem::with_id(app, "tray_show", "Show Settings", true, None::<&str>) {
-        Ok(i) => i,
-        Err(e) => return dlog(app, &format!("[tray] item build failed: {}", e)),
-    };
-    let pause = match MenuItem::with_id(app, "tray_pause", "Pause Wallpaper", true, None::<&str>) {
-        Ok(i) => i,
-        Err(e) => return dlog(app, &format!("[tray] item build failed: {}", e)),
-    };
-    let quit = match MenuItem::with_id(app, "tray_quit", "Quit Novaframe", true, None::<&str>) {
-        Ok(i) => i,
-        Err(e) => return dlog(app, &format!("[tray] item build failed: {}", e)),
-    };
-    let sep = match PredefinedMenuItem::separator(app) {
-        Ok(s) => s,
-        Err(e) => return dlog(app, &format!("[tray] separator build failed: {}", e)),
-    };
-    let menu = match Menu::with_items(app, &[&show, &pause, &sep, &quit]) {
-        Ok(m) => m,
-        Err(e) => return dlog(app, &format!("[tray] menu build failed: {}", e)),
-    };
-
-    // Kept so the menu event handler can flip the label between Pause/Resume.
-    let pause_item = pause.clone();
-
-    let mut builder = TrayIconBuilder::with_id("main-tray")
-        .tooltip("Novaframe Engine")
-        .menu(&menu)
-        .on_menu_event(move |app, event| match event.id.as_ref() {
-            "tray_show" => {
-                if let Some(w) = app.get_webview_window("settings") {
-                    let _ = w.set_focus();
-                    expand_settings_panel(w);
-                }
-            }
-            "tray_pause" => {
-                let paused = !MANUAL_PAUSE.load(Ordering::Relaxed);
-                MANUAL_PAUSE.store(paused, Ordering::Relaxed);
-                recompute_wallpaper_visibility(app);
-                let _ = pause_item.set_text(if paused {
-                    "Resume Wallpaper"
-                } else {
-                    "Pause Wallpaper"
-                });
-            }
-            "tray_quit" => quit_engine(app.clone()),
-            _ => {}
-        });
-
-    if let Some(icon) = app.default_window_icon().cloned() {
-        builder = builder.icon(icon);
-    }
-
-    if let Err(e) = builder.build(app) {
-        dlog(app, &format!("[tray] build failed: {}", e));
-    }
-}
 
 /// True when macOS considers the wallpaper window hidden behind other windows.
 ///
@@ -779,7 +507,7 @@ fn main() {
                 }
             }
 
-            adjust_window_layouts(&app.handle().clone());
+            window::adjust_window_layouts(&app.handle().clone());
 
             // ── First-run: enable autostart once ────────────────────────────
             // A wallpaper should persist across reboots, so default it ON — but
@@ -801,7 +529,7 @@ fn main() {
             }
 
             // ── System tray ─────────────────────────────────────────────────
-            build_tray(&handle);
+            window::build_tray(&handle);
 
             // ── Pause-on-hidden (Windows) ───────────────────────────────────
             // macOS pauses via the NSWindow occlusion loop further down. Windows
@@ -934,7 +662,7 @@ fn main() {
                             last_monitors_hash = hash;
                             #[cfg(target_os = "windows")]
                             last_drift_attempt.clear();
-                            adjust_window_layouts(&handle_clone);
+                            window::adjust_window_layouts(&handle_clone);
                         }
                     }
 
@@ -962,7 +690,7 @@ fn main() {
                                     sz.width, sz.height, mon.position(), ms.width, ms.height
                                 );
                                 if attempt_key != last_drift_attempt {
-                                    adjust_window_layouts(&handle_clone);
+                                    window::adjust_window_layouts(&handle_clone);
                                     dlog(&handle_clone, &format!(
                                         "[layout] drift correction attempted: {}", attempt_key
                                     ));
@@ -1014,7 +742,7 @@ fn main() {
                     "[Novaframe] main POST-underlay: outer_pos={:?} outer_size={:?}",
                     window.outer_position(), window.outer_size()
                 ));
-                adjust_window_layouts(&handle);
+                window::adjust_window_layouts(&handle);
 
                 // The WorkerW reparent above resets the window bounds, and the OS
                 // can apply that reset ASYNCHRONOUSLY — landing after the
@@ -1030,7 +758,7 @@ fn main() {
                     std::thread::spawn(move || {
                         for delay in [150u64, 400, 800] {
                             std::thread::sleep(std::time::Duration::from_millis(delay));
-                            adjust_window_layouts(&retry_handle);
+                            window::adjust_window_layouts(&retry_handle);
                         }
                     });
                 }
@@ -1052,53 +780,61 @@ fn main() {
                 #[cfg(target_os = "macos")]
                 {
                     let settings_clone = settings_window.clone();
-                    // Hover-toggle settings window: poll mouse position against
-                    // the window's NSRect every 100ms; when the cursor enters
-                    // or leaves, expand (275x600) or collapse (40x600). The
-                    // CSS @media queries inside the webview handle the visual
-                    // reveal of the panel-handle vs panel-content based on
-                    // viewport width.                                                 */
+                    let app_handle_main = app.handle().clone();
                     std::thread::spawn(move || {
                         let mut was_hovered = false;
                         loop {
-                            let mut sleep_ms = 800u64;
+                            if state::SHUTDOWN_SIGNAL.load(Ordering::Relaxed) {
+                                break;
+                            }
 
                             if SETTINGS_PANEL_LOCKED.load(Ordering::Relaxed) {
                                 if !was_hovered {
                                     was_hovered = true;
-                                    expand_settings_panel(settings_clone.clone());
+                                    window::expand_settings_panel(settings_clone.clone());
                                 }
                                 std::thread::sleep(std::time::Duration::from_millis(150));
                                 continue;
                             }
 
-                            if let Ok(ns_window_ptr) = settings_clone.ns_window() {
-                                if !ns_window_ptr.is_null() {
-                                    unsafe {
-                                        let ns_window = ns_window_ptr as *mut objc2::runtime::AnyObject;
-                                        let ns_event_class = objc2::class!(NSEvent);
-                                        let mouse_loc: NSPoint = objc2::msg_send![ns_event_class, mouseLocation];
-                                        let frame: NSRect = objc2::msg_send![ns_window, frame];
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let win_for_main = settings_clone.clone();
 
-                                        let is_near = mouse_loc.x >= (frame.origin.x - 50.0);
-                                        if is_near {
-                                            sleep_ms = 100;
-                                        }
+                            let dispatch_res = app_handle_main.run_on_main_thread(move || {
+                                if let Ok(ns_window_ptr) = win_for_main.ns_window() {
+                                    if !ns_window_ptr.is_null() {
+                                        unsafe {
+                                            let ns_window = ns_window_ptr as *mut objc2::runtime::AnyObject;
+                                            let ns_event_class = objc2::class!(NSEvent);
+                                            let mouse_loc: NSPoint = objc2::msg_send![ns_event_class, mouseLocation];
+                                            let frame: NSRect = objc2::msg_send![ns_window, frame];
 
-                                        let is_hovered = mouse_loc.x >= frame.origin.x &&
-                                                         mouse_loc.x <= frame.origin.x + frame.size.width &&
-                                                         mouse_loc.y >= frame.origin.y &&
-                                                         mouse_loc.y <= frame.origin.y + frame.size.height;
-
-                                        if is_hovered != was_hovered {
-                                            was_hovered = is_hovered;
-                                            if is_hovered {
-                                                expand_settings_panel(settings_clone.clone());
-                                            } else {
-                                                collapse_settings_panel(settings_clone.clone());
-                                            }
+                                            let is_near = mouse_loc.x >= (frame.origin.x - 50.0);
+                                            let is_hovered = mouse_loc.x >= frame.origin.x &&
+                                                             mouse_loc.x <= frame.origin.x + frame.size.width &&
+                                                             mouse_loc.y >= frame.origin.y &&
+                                                             mouse_loc.y <= frame.origin.y + frame.size.height;
+                                            let _ = tx.send((is_near, is_hovered));
+                                            return;
                                         }
                                     }
+                                }
+                                let _ = tx.send((false, false));
+                            });
+
+                            if dispatch_res.is_err() {
+                                break;
+                            }
+
+                            let (is_near, is_hovered) = rx.recv().unwrap_or((false, false));
+                            let sleep_ms = if is_near { 100u64 } else { 800u64 };
+
+                            if is_hovered != was_hovered {
+                                was_hovered = is_hovered;
+                                if is_hovered {
+                                    window::expand_settings_panel(settings_clone.clone());
+                                } else {
+                                    window::collapse_settings_panel(settings_clone.clone());
                                 }
                             }
                             std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
@@ -1116,12 +852,15 @@ fn main() {
                     std::thread::spawn(move || {
                         let mut was_hovered = false;
                         loop {
+                            if state::SHUTDOWN_SIGNAL.load(Ordering::Relaxed) {
+                                break;
+                            }
                             std::thread::sleep(std::time::Duration::from_millis(150));
 
                             if SETTINGS_PANEL_LOCKED.load(Ordering::Relaxed) {
                                 if !was_hovered {
                                     was_hovered = true;
-                                    expand_settings_panel(settings_clone.clone());
+                                    window::expand_settings_panel(settings_clone.clone());
                                 }
                                 continue;
                             }
@@ -1143,9 +882,9 @@ fn main() {
                             if is_hovered != was_hovered {
                                 was_hovered = is_hovered;
                                 if is_hovered {
-                                    expand_settings_panel(settings_clone.clone());
+                                    window::expand_settings_panel(settings_clone.clone());
                                 } else {
-                                    collapse_settings_panel(settings_clone.clone());
+                                    window::collapse_settings_panel(settings_clone.clone());
                                 }
                             }
                         }
@@ -1155,7 +894,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, installer::download_and_install_theme, installer::handle_engine_apply, installer::check_theme_updates_rust, installer::get_themes_dir, system::get_hardware_id, set_autostart, get_autostart, power::get_wallpaper_paused, installer::delete_theme, power::set_battery_saver, deeplink::flush_pending_deeplink])
+        .invoke_handler(tauri::generate_handler![window::expand_settings_panel, window::collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, window::open_storefront_window, installer::download_and_install_theme, installer::handle_engine_apply, installer::check_theme_updates_rust, installer::get_themes_dir, system::get_hardware_id, set_autostart, get_autostart, power::get_wallpaper_paused, installer::delete_theme, power::set_battery_saver, deeplink::flush_pending_deeplink])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }
