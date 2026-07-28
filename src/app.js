@@ -1127,21 +1127,10 @@ import {
 // Auto-Updater Integration DOM Bindings
 const updateBtn = document.getElementById('updateBtn');
 const updateStatus = document.getElementById('updateStatus');
-const updateRestartBanner = document.getElementById('updateRestartBanner');
-const updateRestartBtn = document.getElementById('updateRestartBtn');
-
-if (updateRestartBtn) {
-    updateRestartBtn.addEventListener('click', relaunchApp);
-}
 
 if (updateBtn) {
     updateBtn.addEventListener('click', async () => {
         try {
-            if (updateStatus) {
-                updateStatus.innerText = 'Checking for updates...';
-                updateStatus.style.color = '#888';
-            }
-            updateBtn.disabled = true;
             await checkAndInstallUpdate({ silent: false });
         } catch (error) {
             console.error('Update error:', error);
@@ -1150,7 +1139,6 @@ if (updateBtn) {
                 updateStatus.style.color = '#ef4444';
             }
         } finally {
-            updateBtn.disabled = false;
             setTimeout(() => {
                 if (updateStatus && (updateStatus.innerText.includes('latest version') || updateStatus.innerText.includes('failed'))) {
                     updateStatus.innerText = '';

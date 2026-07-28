@@ -10,8 +10,8 @@ export async function relaunchApp() {
 }
 
 export async function checkAndInstallUpdate({ silent }) {
+    const updateBtn = document.getElementById('updateBtn');
     const updateStatus = document.getElementById('updateStatus');
-    const updateRestartBanner = document.getElementById('updateRestartBanner');
 
     const setStatus = (text, color) => {
         if (silent || !updateStatus) return;
@@ -19,53 +19,68 @@ export async function checkAndInstallUpdate({ silent }) {
         if (color) updateStatus.style.color = color;
     };
 
+    const setBtnText = (text, isReady = false) => {
+        if (!updateBtn) return;
+        updateBtn.innerText = text;
+        if (isReady) {
+            updateBtn.disabled = false;
+            updateBtn.style.background = '#10b981';
+            updateBtn.style.borderColor = '#10b981';
+            updateBtn.style.color = '#ffffff';
+        }
+    };
+
     if (updateInstalledPendingRestart) {
-        setStatus('Update ready — restart to apply.', '#10b981');
+        setBtnText('Restarting...');
+        await relaunchApp();
         return;
     }
 
-    const update = await updaterCheck({
-        headers: {
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache'
+    setBtnText('Checking for updates...');
+
+    try {
+        const update = await updaterCheck({
+            headers: {
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache'
+            }
+        });
+        if (!update) {
+            setBtnText('Check for Updates');
+            setStatus('You are on the latest version.', '#10b981');
+            return;
         }
-    });
-    if (!update) {
-        setStatus('You are on the latest version.', '#10b981');
-        return;
-    }
 
-    setStatus(`Update found: v${update.version}. Downloading...`, '#3b82f6');
-    let downloaded = 0;
-    let contentLength = 0;
+        setStatus(`Update found: v${update.version}. Downloading...`, '#3b82f6');
+        setBtnText(`Downloading... 0%`);
+        let downloaded = 0;
+        let contentLength = 0;
 
-    await update.downloadAndInstall((event) => {
-        switch (event.event) {
-            case 'Started':
-                contentLength = event.data.contentLength;
-                setStatus('Downloading... 0%');
-                break;
-            case 'Progress':
-                downloaded += event.data.chunkLength;
-                if (contentLength) {
-                    const percent = Math.round((downloaded / contentLength) * 100);
-                    setStatus(`Downloading... ${percent}%`);
-                }
-                break;
-            case 'Finished':
-                setStatus('Installing...');
-                break;
-        }
-    });
+        await update.downloadAndInstall((event) => {
+            switch (event.event) {
+                case 'Started':
+                    contentLength = event.data.contentLength;
+                    setBtnText(`Downloading... 0%`);
+                    break;
+                case 'Progress':
+                    downloaded += event.data.chunkLength;
+                    if (contentLength) {
+                        const percent = Math.round((downloaded / contentLength) * 100);
+                        setBtnText(`Downloading... ${percent}%`);
+                    }
+                    break;
+                case 'Finished':
+                    setBtnText('Installing...');
+                    break;
+            }
+        });
 
-    updateInstalledPendingRestart = true;
-
-    if (silent) {
-        console.log(`[Updater] v${update.version} installed in background; awaiting restart.`);
-        if (updateRestartBanner) updateRestartBanner.style.display = 'block';
-    } else {
-        setStatus('Update installed! Restarting...', '#10b981');
-        setTimeout(relaunchApp, 1500);
+        updateInstalledPendingRestart = true;
+        setBtnText('Restart to Apply Update', true);
+        setStatus(`v${update.version} installed! Click Restart to apply.`, '#10b981');
+    } catch (err) {
+        setBtnText('Check for Updates');
+        throw err;
     }
 }
 
