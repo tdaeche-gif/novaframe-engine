@@ -83,9 +83,9 @@ export const ThemeManager = {
     async readManifest(themePath) {
         const candidate = 'manifest.json';
         const fileFsPath = `${themePath}/${candidate}`;
-        const url = toThemeUrl(fileFsPath);
+        const url = `${toThemeUrl(fileFsPath)}?t=${Date.now()}`;
         try {
-            const res = await fetch(url).catch(() => null);
+            const res = await fetch(url, { cache: 'no-store' }).catch(() => null);
             if (res && res.ok) {
                 const m = await res.json();
                 return { manifest: m, manifestFile: candidate };
