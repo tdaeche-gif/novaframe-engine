@@ -938,21 +938,25 @@ function friendlyApiError(data) {
 // dropdown). Registered from DOMContentLoaded, decoupled from scanThemes so a
 // failed theme scan can never leave the deep link unhandled.
 let engineApplyListenerRegistered = false;
-let _applyGate = false;
-function registerEngineApplyListener() {
-    if (engineApplyListenerRegistered) return;
-    engineApplyListenerRegistered = true;
+const applyQueue = [];
+let isProcessingApplyQueue = false;
 
-    listen('engine-apply-theme', async (event) => {
-        if (_applyGate) return;
-        _applyGate = true;
+async function processApplyQueue() {
+    if (isProcessingApplyQueue || applyQueue.length === 0) return;
+    isProcessingApplyQueue = true;
+
+    while (applyQueue.length > 0) {
+        const token = applyQueue.shift();
         const TAG = '[Main]';
         const stamp = `[${Date.now() % 100000}]`;
-        const token = event?.payload;
-        console.log(TAG, stamp, 'engine-apply-theme listener fired with token len:', token?.length ?? 0);
+        console.log(TAG, stamp, 'engine-apply-theme processing token len:', token?.length ?? 0);
 
         try {
-            const installedThemeId = await invoke('handle_engine_apply', { token });
+            const applyTask = invoke('handle_engine_apply', { token });
+            const timeoutTask = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Engine apply timed out after 15s')), 15000)
+            );
+            const installedThemeId = await Promise.race([applyTask, timeoutTask]);
             console.log(TAG, stamp, `✅ Rust handle_engine_apply returned dir=${installedThemeId}`);
 
             const themesDir = await getThemesDir();
@@ -963,8 +967,21 @@ function registerEngineApplyListener() {
             console.error(TAG, stamp, '❌ handle_engine_apply failed:', err);
             const msg = typeof err === 'string' ? err : (err?.message ?? 'License verification failed.');
             await alertInPanel(msg);
-        } finally {
-            _applyGate = false;
+        }
+    }
+
+    isProcessingApplyQueue = false;
+}
+
+function registerEngineApplyListener() {
+    if (engineApplyListenerRegistered) return;
+    engineApplyListenerRegistered = true;
+
+    listen('engine-apply-theme', (event) => {
+        const token = event?.payload;
+        if (token) {
+            applyQueue.push(token);
+            processApplyQueue();
         }
     });
 
