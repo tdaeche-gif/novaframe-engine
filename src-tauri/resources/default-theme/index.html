@@ -25,8 +25,8 @@
         const uniforms = {
             u_time: { value: 0.0 },
             u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-            u_color_a: { value: new THREE.Color("#1a1e3c") },
-            u_color_b: { value: new THREE.Color("#c96f8e") },
+            u_color_a: { value: new THREE.Color("#0f1428") },
+            u_color_b: { value: new THREE.Color("#e15b88") },
             u_speed: { value: 0.26 },
             u_grain: { value: 0.3 }
         };
@@ -42,17 +42,17 @@
             void main(){
                 float aspect=u_resolution.x/u_resolution.y;
                 vec2 p=(vUv-0.5)*vec2(aspect,1.0);
-                // minutes-scale breath: warm center swells and recedes
-                float t=u_time*u_speed*0.05;
+                // breathing pulse: center swells and recedes across viewport
+                float t=u_time*u_speed*0.18;
                 float breath=0.5+0.5*sin(t*6.28318);
-                // the gradient's focal point drifts in a slow lissajous
+                // focal point Lissajous drift
                 vec2 focus=vec2(sin(t*2.1)*0.25, cos(t*1.4)*0.2);
                 float d=length(p-focus);
-                float g=smoothstep(0.15+breath*0.55, 1.3-breath*0.25, d);
+                float g=smoothstep(0.08+breath*0.48, 1.05-breath*0.2, d);
                 vec3 col=mix(u_color_b,u_color_a,clamp(g,0.0,1.0));
-                // hue shimmer: color B leans slightly warmer/cooler across the cycle
-                col+=vec3(0.02,-0.01,0.015)*sin(t*4.0)*(1.0-g);
-                // gentle top-to-bottom deepening so desktop icons sit on darker ground
+                // hue shimmer: color B leans slightly warmer/cooler across cycle
+                col+=vec3(0.03,-0.015,0.02)*sin(t*4.0)*(1.0-g);
+                // gentle top-to-bottom deepening
                 col*=0.9+0.1*vUv.y;
                 // film grain
                 col+=(hash(vUv*u_resolution.xy+fract(u_time)*7.0)-0.5)*0.06*u_grain;
