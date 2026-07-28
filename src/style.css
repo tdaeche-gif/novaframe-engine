@@ -265,12 +265,15 @@ html[data-mode="settings"] #container { display: none; }
     font-size: 14px;
     color: #ffffff;
 }
-#settingsPanel hr, #settingsPanel .header-hr {
+#settingsPanel hr, #settingsPanel .header-hr, #settingsPanel .section-divider {
     border: 0;
     height: 1px;
     background: linear-gradient(to right, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02));
-    margin: 4px 0 8px 0;
+    margin: 12px 0 10px 0;
     width: 100%;
+}
+#settingsPanel .header-hr {
+    margin: 4px 0 8px 0;
 }
 .control-group {
     margin-bottom: 0;
@@ -279,11 +282,11 @@ html[data-mode="settings"] #container { display: none; }
 }
 .control-group label {
     display: block;
-    font-size: 12px;
-    font-weight: 500;
-    margin-bottom: 10px;
-    color: #8da2fb;
-    letter-spacing: 0.02em;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #ffffff;
+    letter-spacing: -0.01em;
 }
 .control-row {
     display: flex;
