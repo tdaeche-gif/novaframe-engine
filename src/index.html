@@ -74,18 +74,18 @@
             <!-- COMMON-SCOPE: visible for all themes -->
             <div class="control-group">
                 <label for="themeSelector">Active Theme</label>
-                <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center;">
-                    <select id="themeSelector" style="flex: 1; height: 36px; box-sizing: border-box; margin-bottom: 0;">
+                <div class="theme-select-wrapper">
+                    <select id="themeSelector">
                         <option value="" disabled selected>Select Wallpaper</option>
                     </select>
-                    <button id="deleteThemeBtn" style="width: 36px; height: 36px; box-sizing: border-box; flex-shrink: 0; padding: 0; border-radius: 6px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #fff; cursor: pointer; transition: all 0.2s ease;" title="Remove this wallpaper from your library" aria-label="Remove this wallpaper">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <button id="deleteThemeBtn" class="theme-action-btn btn-delete" title="Remove this wallpaper from your library" aria-label="Remove this wallpaper">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <polyline points="3 6 5 6 21 6"></polyline>
                             <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
                         </svg>
                     </button>
-                    <button id="refreshThemeBtn" style="width: 36px; height: 36px; box-sizing: border-box; flex-shrink: 0; padding: 0; border-radius: 6px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #fff; cursor: pointer; transition: all 0.2s ease;" title="Reload Wallpaper">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <button id="refreshThemeBtn" class="theme-action-btn btn-refresh" title="Reload Wallpaper" aria-label="Reload Wallpaper">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <polyline points="23 4 23 10 17 10"></polyline>
                             <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
                         </svg>

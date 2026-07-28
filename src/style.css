@@ -389,9 +389,21 @@ html[data-mode="settings"] #container { display: none; }
     margin-top: 5px;
 }
 
-/* Custom Dropdown */
-#themeSelector {
+/* Custom Dropdown & Action Buttons */
+.theme-select-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 12px;
     width: 100%;
+}
+
+.theme-select-wrapper #themeSelector {
+    flex: 1 1 auto;
+    width: 0 !important;
+    min-width: 0;
+    margin-bottom: 0 !important;
+    height: 36px;
     padding: 8px 30px 8px 12px !important;
     background: rgba(7, 10, 15, 0.6) !important;
     border: 1px solid rgba(255, 255, 255, 0.08) !important;
@@ -408,11 +420,44 @@ html[data-mode="settings"] #container { display: none; }
     background-position: right 10px center !important;
     transition: border-color 0.2s, box-shadow 0.2s;
     box-sizing: border-box;
-    margin-bottom: 12px;
 }
+
 #themeSelector:focus {
     border-color: #00a2ff !important;
     box-shadow: 0 0 8px rgba(0, 162, 255, 0.2);
+}
+
+.theme-action-btn {
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    flex-shrink: 0;
+    padding: 0;
+    margin: 0;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #8da2fb;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.theme-action-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.25);
+    color: #ffffff;
+}
+
+.theme-action-btn.btn-delete:hover {
+    background: rgba(239, 68, 68, 0.18);
+    border-color: rgba(239, 68, 68, 0.45);
+    color: #ef4444;
 }
 
 /* Range Slider */
