@@ -119,7 +119,7 @@ fn get_hardware_id() -> Result<String, String> {
 
 #[tauri::command]
 async fn handle_engine_apply(app: tauri::AppHandle, token: String) -> Result<String, String> {
-    let hardware_id = machine_uid::get().ok();
+    let hardware_id = machine_uid::get().unwrap_or_else(|_| "unknown-device".to_string());
     dlog(&app, &format!("[engine-apply] starting verification for token len={}", token.len()));
 
     let client = reqwest::Client::builder()
@@ -361,11 +361,20 @@ async fn open_storefront_window(app: tauri::AppHandle) -> Result<(), String> {
             .parse()
             .map_err(|_| "invalid storefront url".to_string())?,
     );
+    let app_handle = app.clone();
     tauri::WebviewWindowBuilder::new(&app, "storefront", url)
         .title("Novaframe Marketplace")
         .inner_size(1280.0, 800.0)
         .resizable(true)
         .decorations(true)
+        .on_navigation(move |nav_url| {
+            let s = nav_url.as_str();
+            if s.starts_with("novaframe://") {
+                process_deeplink_url(&app_handle, s);
+                return false;
+            }
+            true
+        })
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -535,12 +544,11 @@ async fn download_and_install_theme(
     // ── Validate the extracted theme before it ever reaches the dropdown ─────
     // A valid zip missing a manifest would otherwise install a dead theme that
     // shows in the list and silently fails to load. Reject it here instead.
-    let has_manifest = staging_dir.join("engine_manifest.json").exists()
-        || staging_dir.join("manifest.json").exists();
+    let has_manifest = staging_dir.join("manifest.json").exists();
     dlog(&app, &format!("[install] extracted OK, has_manifest={} staging={:?}", has_manifest, staging_dir));
     if !has_manifest {
         return Err(
-            "Downloaded theme is missing its manifest (engine_manifest.json / manifest.json). \
+            "Downloaded theme is missing manifest.json. \
              The file may be corrupt — please try Apply again."
                 .to_string(),
         );
@@ -1435,6 +1443,42 @@ fn desktop_is_covered() -> bool {
     })
 }
 
+fn process_deeplink_url(app: &tauri::AppHandle, url_str: &str) {
+    dlog(app, &format!("[deeplink] received: {}", url_str));
+    if url_str.starts_with("novaframe://apply") {
+        let parsed = match tauri::Url::parse(url_str) {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+        if let Some(query) = parsed.query() {
+            let raw_token = query
+                .split('&')
+                .find(|p| p.starts_with("token="))
+                .and_then(|p| p.strip_prefix("token="));
+
+            match raw_token.and_then(|v| urlencoding::decode(v).ok()) {
+                Some(decoded_token) => {
+                    let token_str = decoded_token.into_owned();
+                    dlog(app, &format!("[deeplink] emitting engine-apply-theme token_len={}", token_str.len()));
+                    let target_win = app.get_webview_window("settings");
+                    let res = match target_win {
+                        Some(w) => w.emit("engine-apply-theme", token_str),
+                        None => app.emit("engine-apply-theme", token_str),
+                    };
+                    if let Err(e) = res {
+                        dlog(app, &format!("[deeplink] emit engine-apply-theme error: {}", e));
+                    }
+                }
+                None => {
+                    dlog(app, "[deeplink] token= param missing or invalid UTF-8");
+                }
+            }
+        } else {
+            dlog(app, "[deeplink] apply URL had no query string");
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         // Must be the first plugin registered. Without it, clicking a
@@ -1442,9 +1486,14 @@ fn main() {
         // instance (two wallpaper windows, doubled CPU, orphan settings
         // panel) instead of delivering the URL to the running one. The
         // "deep-link" feature forwards the URL to on_open_url automatically.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(w) = app.get_webview_window("settings") {
                 let _ = w.set_focus();
+            }
+            for arg in args {
+                if arg.starts_with("novaframe://apply") {
+                    process_deeplink_url(app, &arg);
+                }
             }
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1478,38 +1527,26 @@ fn main() {
             // frontend change — it just has to exist before the scan.
             provision_default_theme(&handle);
 
-            // On Windows/Linux the novaframe:// scheme lives in the registry /
-            // desktop files. The NSIS installer registers it, but re-assert at
-            // runtime so portable/dev builds and moved installs still work.
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
-            {
-                if let Err(e) = handle.deep_link().register_all() {
-                    println!("[Novaframe] deep-link register_all failed: {}", e);
-                }
+            // Register deep link scheme across all desktop OS targets so dev/debug and moved
+            // installs re-bind LaunchServices / OS scheme registry on launch.
+            if let Err(e) = handle.deep_link().register_all() {
+                dlog(&handle, &format!("[Novaframe] deep-link register_all failed: {}", e));
             }
 
             // Handle incoming deep links (novaframe://apply?url=...)
             let dl_handle = handle.clone();
             handle.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
-                    let url_str = url.as_str();
-                    dlog(&dl_handle, &format!("[deeplink] received: {}", url_str));
-                    if url_str.starts_with("novaframe://apply") {
-                        if let Some(query) = url.query() {
-                            // Basic extraction of token= param
-                            if let Some(token) = query.split('&').find(|p| p.starts_with("token=")).map(|p| p.trim_start_matches("token=")) {
-                                // Send event to JS frontend to handle verification
-                                dlog(&dl_handle, &format!("[deeplink] emitting engine-apply-theme token_len={}", token.len()));
-                                let _ = dl_handle.emit("engine-apply-theme", token);
-                            } else {
-                                dlog(&dl_handle, "[deeplink] no token= param found in query");
-                            }
-                        } else {
-                            dlog(&dl_handle, "[deeplink] apply URL had no query string");
-                        }
-                    }
+                    process_deeplink_url(&dl_handle, url.as_str());
                 }
             });
+
+            // Cold-start deep link processing (catch URL if app opened via deep link)
+            if let Ok(Some(urls)) = handle.deep_link().get_current() {
+                for url in urls {
+                    process_deeplink_url(&handle, url.as_str());
+                }
+            }
 
             adjust_window_layouts(&app.handle().clone());
 

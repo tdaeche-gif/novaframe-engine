@@ -77,26 +77,25 @@ export const ThemeManager = {
     },
 
     async readManifest(themePath) {
-        const candidates = ['engine_manifest.json', 'theme.json', 'manifest.json'];
-        for (const candidate of candidates) {
-            const fileFsPath = `${themePath}/${candidate}`;
-            const url = toThemeUrl(fileFsPath);
-            try {
-                const res = await fetch(url).catch(() => null);
-                if (res && res.ok) {
-                    const m = await res.json();
-                    return { manifest: m, manifestFile: candidate };
-                }
-            } catch (_) {}
+        const candidate = 'manifest.json';
+        const fileFsPath = `${themePath}/${candidate}`;
+        const url = toThemeUrl(fileFsPath);
+        try {
+            const res = await fetch(url).catch(() => null);
+            if (res && res.ok) {
+                const m = await res.json();
+                return { manifest: m, manifestFile: candidate };
+            }
+        } catch (_) {}
 
-            try {
-                const content = await readTextFile(fileFsPath);
-                if (content) {
-                    const m = JSON.parse(content);
-                    return { manifest: m, manifestFile: candidate };
-                }
-            } catch (_) {}
-        }
+        try {
+            const content = await readTextFile(fileFsPath);
+            if (content) {
+                const m = JSON.parse(content);
+                return { manifest: m, manifestFile: candidate };
+            }
+        } catch (_) {}
+
         throw new Error(`Manifest not found under ${themePath}`);
     },
 

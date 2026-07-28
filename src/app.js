@@ -503,7 +503,8 @@ function updateSettingsScope(themePath) {
 async function initSettingsUI() {
     // 1. Wire the exit button — fully quits the engine so the user never needs Task Manager
     const quitBtn = document.getElementById('quitEngineBtn');
-    if (quitBtn) {
+    if (quitBtn && !quitBtn._wired) {
+        quitBtn._wired = true;
         quitBtn.addEventListener('click', async () => {
             console.log('[Novaframe] Exit button clicked — quitting engine');
             try {
@@ -535,7 +536,8 @@ async function initSettingsUI() {
     }
 
     const openStoreBtn = document.getElementById('openStoreBtn');
-    if (openStoreBtn) {
+    if (openStoreBtn && !openStoreBtn._wired) {
+        openStoreBtn._wired = true;
         openStoreBtn.addEventListener('click', async () => {
             await invoke('open_storefront_window').catch(err =>
                 console.error("[Novaframe] open_storefront_window failed:", err)
@@ -936,11 +938,14 @@ function friendlyApiError(data) {
 // dropdown). Registered from DOMContentLoaded, decoupled from scanThemes so a
 // failed theme scan can never leave the deep link unhandled.
 let engineApplyListenerRegistered = false;
+let _applyGate = false;
 function registerEngineApplyListener() {
     if (engineApplyListenerRegistered) return;
     engineApplyListenerRegistered = true;
 
     listen('engine-apply-theme', async (event) => {
+        if (_applyGate) return;
+        _applyGate = true;
         const TAG = '[Main]';
         const stamp = `[${Date.now() % 100000}]`;
         const token = event?.payload;
@@ -958,6 +963,8 @@ function registerEngineApplyListener() {
             console.error(TAG, stamp, '❌ handle_engine_apply failed:', err);
             const msg = typeof err === 'string' ? err : (err?.message ?? 'License verification failed.');
             await alertInPanel(msg);
+        } finally {
+            _applyGate = false;
         }
     });
 }
@@ -998,10 +1005,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     await ConfigManager.init();
     initDualWindowSystem();
 
-    // Deep-link listener must always be live — Rust emits to ALL windows
-    registerEngineApplyListener();
-
     if (isSettingsWindow()) {
+        registerEngineApplyListener();
         initSettingsUI();
     }
 
