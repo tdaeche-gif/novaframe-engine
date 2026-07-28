@@ -24,7 +24,12 @@ export async function checkAndInstallUpdate({ silent }) {
         return;
     }
 
-    const update = await updaterCheck();
+    const update = await updaterCheck({
+        headers: {
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache'
+        }
+    });
     if (!update) {
         setStatus('You are on the latest version.', '#10b981');
         return;
