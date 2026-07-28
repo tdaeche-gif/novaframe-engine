@@ -39,8 +39,11 @@ pub fn sync_shared_runtime(app: &tauri::AppHandle) {
     }
 }
 
+static INSTALL_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tauri::command]
 pub async fn handle_engine_apply(app: tauri::AppHandle, token: String) -> Result<String, String> {
+    let _guard = INSTALL_MUTEX.lock().await;
     let hardware_id = machine_uid::get().unwrap_or_else(|_| "unknown-device".to_string());
     dlog(&app, &format!("[engine-apply] starting verification for token len={}", token.len()));
 

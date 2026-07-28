@@ -6,9 +6,10 @@ mod system;
 mod theme_protocol;
 mod power;
 mod installer;
+mod deeplink;
 
 use state::*;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
 
@@ -16,7 +17,6 @@ use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
 use objc2_foundation::{NSPoint, NSRect};
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 
 // ── Autostart (launch on login) ─────────────────────────────────────────────
 #[tauri::command]
@@ -199,7 +199,7 @@ async fn open_storefront_window(app: tauri::AppHandle) -> Result<(), String> {
         .on_navigation(move |nav_url| {
             let s = nav_url.as_str();
             if s.starts_with("novaframe://") {
-                process_deeplink_url(&app_handle, s);
+                deeplink::process_deeplink_url(&app_handle, s);
                 return false;
             }
             true
@@ -708,76 +708,7 @@ fn desktop_is_covered() -> bool {
     })
 }
 
-fn decode_deeplink_token(raw_token: &str) -> Option<String> {
-    percent_encoding::percent_decode_str(raw_token)
-        .decode_utf8()
-        .ok()
-        .map(|s| s.into_owned())
-}
 
-#[tauri::command]
-fn flush_pending_deeplink(app: tauri::AppHandle) {
-    if let Ok(mut guard) = PENDING_DEEPLINK_TOKEN.lock() {
-        if let Some(token_str) = guard.take() {
-            dlog(&app, &format!("[deeplink] flushing pending token_len={}", token_str.len()));
-            if let Some(w) = app.get_webview_window("settings") {
-                let _ = w.emit("engine-apply-theme", token_str);
-            } else {
-                let _ = app.emit("engine-apply-theme", token_str);
-            }
-        }
-    }
-}
-
-fn process_deeplink_url(app: &tauri::AppHandle, url_str: &str) {
-    dlog(app, &format!("[deeplink] received: {}", url_str));
-    if url_str.starts_with("novaframe://apply") {
-        let parsed = match tauri::Url::parse(url_str) {
-            Ok(u) => u,
-            Err(_) => return,
-        };
-        if let Some(query) = parsed.query() {
-            let raw_token = query
-                .split('&')
-                .find(|p| p.starts_with("token="))
-                .and_then(|p| p.strip_prefix("token="));
-
-            let decoded_res = raw_token.and_then(decode_deeplink_token);
-            match decoded_res {
-                Some(token_str) => {
-                    let now = Instant::now();
-                    if let Ok(mut guard) = LAST_DEEPLINK_SEEN.lock() {
-                        if let Some((ref last_token, last_time)) = *guard {
-                            if last_token == &token_str && now.duration_since(last_time).as_millis() < 1500 {
-                                dlog(app, "[deeplink] deduplicated duplicate trigger within 1.5s window");
-                                return;
-                            }
-                        }
-                        *guard = Some((token_str.clone(), now));
-                    }
-
-                    if let Some(target_win) = app.get_webview_window("settings") {
-                        dlog(app, &format!("[deeplink] emitting engine-apply-theme token_len={}", token_str.len()));
-                        if let Err(e) = target_win.emit("engine-apply-theme", token_str) {
-                            dlog(app, &format!("[deeplink] emit engine-apply-theme error: {}", e));
-                        }
-                    } else {
-                        dlog(app, &format!("[deeplink] settings window missing, buffering pending token_len={}", token_str.len()));
-                        if let Ok(mut pending_guard) = PENDING_DEEPLINK_TOKEN.lock() {
-                            *pending_guard = Some(token_str.clone());
-                        }
-                        let _ = app.emit("engine-apply-theme", token_str);
-                    }
-                }
-                None => {
-                    dlog(app, "[deeplink] token= param missing or invalid UTF-8");
-                }
-            }
-        } else {
-            dlog(app, "[deeplink] apply URL had no query string");
-        }
-    }
-}
 
 fn main() {
     tauri::Builder::default()
@@ -792,7 +723,7 @@ fn main() {
             }
             for arg in args {
                 if arg.starts_with("novaframe://apply") {
-                    process_deeplink_url(app, &arg);
+                    deeplink::process_deeplink_url(app, &arg);
                 }
             }
         }))
@@ -837,14 +768,14 @@ fn main() {
             let dl_handle = handle.clone();
             handle.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
-                    process_deeplink_url(&dl_handle, url.as_str());
+                    deeplink::process_deeplink_url(&dl_handle, url.as_str());
                 }
             });
 
             // Cold-start deep link processing (catch URL if app opened via deep link)
             if let Ok(Some(urls)) = handle.deep_link().get_current() {
                 for url in urls {
-                    process_deeplink_url(&handle, url.as_str());
+                    deeplink::process_deeplink_url(&handle, url.as_str());
                 }
             }
 
@@ -1224,7 +1155,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, installer::download_and_install_theme, installer::handle_engine_apply, installer::check_theme_updates_rust, installer::get_themes_dir, system::get_hardware_id, set_autostart, get_autostart, power::get_wallpaper_paused, installer::delete_theme, power::set_battery_saver, flush_pending_deeplink])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, installer::download_and_install_theme, installer::handle_engine_apply, installer::check_theme_updates_rust, installer::get_themes_dir, system::get_hardware_id, set_autostart, get_autostart, power::get_wallpaper_paused, installer::delete_theme, power::set_battery_saver, deeplink::flush_pending_deeplink])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }
@@ -1251,7 +1182,7 @@ mod tests {
 
     #[test]
     fn test_deeplink_token_decoding_preserves_plus_slashes_and_equals() {
-        use super::decode_deeplink_token;
+        use super::deeplink::decode_deeplink_token;
         let token = "eyJhbGciOiJIUzI1NiJ9+test/token==";
         let decoded = decode_deeplink_token(token);
         assert_eq!(decoded, Some("eyJhbGciOiJIUzI1NiJ9+test/token==").map(String::from));

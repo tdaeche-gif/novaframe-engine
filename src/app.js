@@ -961,20 +961,33 @@ async function processApplyQueue() {
     isProcessingApplyQueue = false;
 }
 
-function registerEngineApplyListener() {
+let unlistenEngineApply = null;
+
+async function registerEngineApplyListener() {
     if (engineApplyListenerRegistered) return;
     engineApplyListenerRegistered = true;
 
-    listen('engine-apply-theme', (event) => {
-        const token = event?.payload;
-        if (token) {
-            applyQueue.push(token);
-            processApplyQueue();
-        }
-    });
+    try {
+        unlistenEngineApply = await listen('engine-apply-theme', (event) => {
+            const token = event?.payload;
+            if (token) {
+                applyQueue.push(token);
+                processApplyQueue();
+            }
+        });
+    } catch (err) {
+        console.error('[Main] Failed to listen to engine-apply-theme:', err);
+    }
 
     invoke('flush_pending_deeplink').catch(() => {});
 }
+
+window.addEventListener('beforeunload', () => {
+    if (typeof unlistenEngineApply === 'function') {
+        unlistenEngineApply();
+        unlistenEngineApply = null;
+    }
+});
 
 document.addEventListener('DOMContentLoaded', async () => {
     // Delegated panel locking for selects + color pickers (covers dynamically
