@@ -62,7 +62,7 @@
       "endpoints": [
         "https://api.novaframe.co.uk/api/engine/updates/{{target}}/{{current_version}}"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYxNjg0NEYyNkNEMjRDMjgKUldRb1ROSnM4a1JvOFcxaXVuWkRZd0dES2xqeFpJbS9oS2hEaFlRR2xrVlA4VDFHdGlJNUhNQUEK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM1NERFMzdDNTNDNTNENzMKUldSelBjVlRmT05OTmFxSWVpaEFxT3U4NFJ5L05haHJQc3NwQlZLajAydVJrNm9KS2Q4TVp6dk8K"
     }
   },
   "bundle": {
