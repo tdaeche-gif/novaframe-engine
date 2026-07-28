@@ -109,6 +109,14 @@
 
             <!-- System Toggles Section -->
             <div class="control-group system-toggles-group">
+                <div id="fpsRow" class="control-row-group">
+                    <label for="fpsSelector">Target Frame Rate</label>
+                    <select id="fpsSelector">
+                        <option value="30" selected>30 FPS (Power Saver)</option>
+                        <option value="60">60 FPS (Smooth)</option>
+                        <option value="120">120 FPS (High Refresh)</option>
+                    </select>
+                </div>
                 <label class="toggle-row" for="rotationToggle">
                     <span>Rotate wallpapers</span>
                     <input type="checkbox" id="rotationToggle">

@@ -12,7 +12,8 @@ export const DEFAULT_CONFIG = {
     rotation_enabled: false,
     rotation_interval_min: 60,
     pause_on_battery: false,
-    onboarding_seen: false
+    onboarding_seen: false,
+    target_fps: 30
 };
 
 let currentConfig = { ...DEFAULT_CONFIG };

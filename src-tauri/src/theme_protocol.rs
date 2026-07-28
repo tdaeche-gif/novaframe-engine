@@ -98,12 +98,25 @@ pub fn handle_theme_protocol(
         return deny(403);
     }
 
-    match std::fs::read(&canon) {
+    // Intentional Protocol Interception: All requests for novaframe-wallpaper.js
+    // across installed themes are intercepted and served directly from app resources
+    // so every theme automatically inherits canonical runtime updates (e.g. dynamic FPS).
+    let served_path = if canon.file_name().and_then(|n| n.to_str()) == Some("novaframe-wallpaper.js") {
+        app.path()
+            .resolve("resources/default-theme/novaframe-wallpaper.js", tauri::path::BaseDirectory::Resource)
+            .ok()
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| canon.clone())
+    } else {
+        canon.clone()
+    };
+
+    match std::fs::read(&served_path) {
         Ok(bytes) => {
-            dlog(app, &format!("[theme://] 200 served {} bytes: {:?}", bytes.len(), canon));
+            dlog(app, &format!("[theme://] 200 served {} bytes: {:?}", bytes.len(), served_path));
             tauri::http::Response::builder()
                 .status(200)
-                .header("Content-Type", mime_for(&canon))
+                .header("Content-Type", mime_for(&served_path))
                 // Required: the main window (tauri://localhost origin) fetches manifests
                 // cross-origin from theme://localhost.
                 .header("Access-Control-Allow-Origin", "*")

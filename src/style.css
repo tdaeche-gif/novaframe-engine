@@ -281,6 +281,17 @@ html[data-mode="settings"] #welcomeOverlay { display: none !important; }
     flex-direction: column;
     gap: 10px;
 }
+.system-toggles-group .control-row-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 2px;
+}
+.system-toggles-group .control-row-group select {
+    width: 100%;
+    height: 36px;
+    box-sizing: border-box;
+}
 .system-toggles-group .toggle-row {
     margin-top: 0 !important;
 }

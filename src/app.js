@@ -529,6 +529,7 @@ async function initSettingsUI() {
 
     // 4. Library management, rotation and power controls
     initDeleteThemeButton();
+    initFpsControl();
     initBatterySaverToggle();
     initRotationControls();
 
@@ -583,6 +584,27 @@ function initDeleteThemeButton() {
         }
         await scanThemes();
         updateSettingsScope(await ConfigManager.getTheme());
+    });
+}
+
+// ── Target Frame Rate ──────────────────────────────────────────────────────
+function initFpsControl() {
+    const selector = document.getElementById('fpsSelector');
+    if (!selector) return;
+
+    selector.value = String(config.target_fps || 30);
+
+    selector.addEventListener('change', async (e) => {
+        const val = Number(e.target.value) || 30;
+        config = { ...config, target_fps: val };
+        await ConfigManager.saveConfig();
+
+        if (ThemeManager.currentIframe?.contentWindow) {
+            ThemeManager.currentIframe.contentWindow.postMessage({
+                type: 'novaframe-settings',
+                settings: { fps: val }
+            }, '*');
+        }
     });
 }
 

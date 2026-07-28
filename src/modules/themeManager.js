@@ -60,8 +60,8 @@ export function relayThemeSettingsToIframe(currentThemePath = ThemeManager.curre
     const cw = (currentIframe || ThemeManager.currentIframe)?.contentWindow;
     if (!tp || !cw) return;
     const cfg = configPassed || getConfig();
-    const settings = cfg?.theme_settings?.[tp];
-    if (!settings) return;
+    const settings = { ...(cfg?.theme_settings?.[tp] || {}), fps: cfg?.target_fps || 30 };
+    if (!settings || !Object.keys(settings).length) return;
     const serialized = JSON.stringify(settings);
     if (serialized === _lastRelayedSettings) return;
     _lastRelayedSettings = serialized;
@@ -211,7 +211,7 @@ export const ThemeManager = {
                 if (s.default !== undefined) defaults[s.id] = s.default;
             });
             const saved = (cfg?.theme_settings && cfg.theme_settings[themePath]) || {};
-            const settings = { ...defaults, ...saved };
+            const settings = { ...defaults, ...saved, fps: cfg?.target_fps || 30 };
             if (Object.keys(settings).length > 0) {
                 _lastRelayedSettings = JSON.stringify(settings);
                 try {

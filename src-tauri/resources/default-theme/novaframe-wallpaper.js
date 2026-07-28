@@ -77,6 +77,9 @@
       return true;
     }
 
+    var fpsWindowStart = 0;
+    var fpsWindowFrames = 0;
+
     function loop(now) {
       // When inactive, do NOT reschedule — this is what makes pause truly free.
       if (!isActive()) { rafId = null; return; }
@@ -86,6 +89,18 @@
       lastDraw = now;
       lastTs = now;
       frameCount++;
+
+      // Live FPS verification logging
+      fpsWindowFrames++;
+      if (!fpsWindowStart) {
+        fpsWindowStart = now;
+      } else if (now - fpsWindowStart >= 2000) {
+        var measuredFps = Math.round((fpsWindowFrames * 1000) / (now - fpsWindowStart));
+        console.log('[Novaframe Runtime] Live Measured FPS: ' + measuredFps + ' (Target: ' + (fps || 30) + ' FPS)');
+        fpsWindowStart = now;
+        fpsWindowFrames = 0;
+      }
+
       onFrame({
         now: now, dt: dt, frame: frameCount,
         width: width, height: height, dpr: dpr, preview: isPreview
@@ -116,6 +131,15 @@
         if (!engineControlled) { engineControlled = true; syncLoop(); }
       }
       if (d.type === 'novaframe-settings' && d.settings) {
+        if (d.settings.fps != null) {
+          var v = Number(d.settings.fps);
+          if (!isNaN(v) && v > 0) {
+            fps = v;
+            effectiveFps = isPreview ? Math.min(fps, 10) : fps;
+            frameInterval = effectiveFps > 0 ? 1000 / effectiveFps : 0;
+            if (isActive()) syncLoop();
+          }
+        }
         onSettings(d.settings);
       } else if (d.type === 'novaframe-occlusion') {
         occluded = !!d.occluded;
