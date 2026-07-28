@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "esbuild src/app.js --bundle --outfile=src/app.bundle.js --platform=browser --target=es2020 --format=esm",
-    "watch": "esbuild src/app.js --bundle --outfile=src/app.bundle.js --platform=browser --target=es2020 --format=esm --watch",
+    "build": "./node_modules/.bin/esbuild src/app.js --bundle --outfile=src/app.bundle.js --platform=browser --target=es2020 --format=iife",
+    "watch": "./node_modules/.bin/esbuild src/app.js --bundle --outfile=src/app.bundle.js --platform=browser --target=es2020 --format=iife --watch",
     "tauri": "tauri"
   },
   "devDependencies": {

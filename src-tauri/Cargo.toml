@@ -27,7 +27,7 @@ tauri-plugin-desktop-underlay = "0.2.1"
 tauri-plugin-store = "2.4.3"
 tauri-plugin-deep-link = "2.4.9"
 urlencoding = "2.1.3"
-reqwest = { version = "0.13.4", features = ["stream"] }
+reqwest = { version = "0.13.4", features = ["stream", "json"] }
 zip = "8.6.0"
 # Stable per-machine identifier for DRM device locking
 machine-uid = "0.5"

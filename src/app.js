@@ -1,3 +1,5 @@
+console.log("[Novaframe] bundle sentinel: novaframe-app-v0.4.0-settings-fix");
+
 // ── Tauri API imports ────────────────────────────────────────────────────────
 // withGlobalTauri is false — window.__TAURI__ is NOT injected. All Tauri APIs
 // must come from these imports. esbuild bundles this into src/app.bundle.js.
@@ -9,102 +11,30 @@ import { Store } from '@tauri-apps/plugin-store';
 import { check as updaterCheck } from '@tauri-apps/plugin-updater';
 import { relaunch, exit as processExit } from '@tauri-apps/plugin-process';
 
-// ── Engine constants ──────────────────────────────────────────────────────────
-// Highest theme manifest_version this engine build knows how to render. A theme
-// may set `manifest_version` in its manifest; if it declares a higher version
-// than this, the engine can't guarantee correct rendering and skips it (prompting
-// an engine update) rather than rendering it wrong. Manifests without the field
-// are treated as v1 (the current format). Bump this whenever the manifest schema
-// gains a breaking change.
-const ENGINE_MANIFEST_VERSION = 1;
+import {
+    ENGINE_MANIFEST_VERSION,
+    IS_WINDOWS_WEBVIEW,
+    manifestNeedsNewerEngine,
+    toThemeUrl
+} from './modules/constants.js';
+import { getMode, isMainWindow, isSettingsWindow } from './modules/windowEnv.js';
 
-// True if a manifest requires a newer engine than this build supports.
-function manifestNeedsNewerEngine(manifest) {
-    const v = Number(manifest?.manifest_version);
-    return Number.isFinite(v) && v > ENGINE_MANIFEST_VERSION;
-}
+import {
+    safeInvoke,
+    getThemesDir,
+    getHardwareId,
+    setIgnoreCursor,
+    reportJsError
+} from './modules/tauriBridge.js';
 
-// Helper to resolve the themes directory path in AppData dynamically
-async function getThemesDir() {
-    try {
-        let themesDir = await invoke('get_themes_dir');
-        // Ensure no trailing slash
-        if (themesDir.endsWith('/') || themesDir.endsWith('\\')) {
-            themesDir = themesDir.slice(0, -1);
-        }
-        return themesDir;
-    } catch (e) {
-        console.error("[Novaframe] Failed to get appDataDir from Rust, falling back to local themes:", e);
-        return 'themes';
-    }
-}
 
-// Build a theme:// URL from an absolute filesystem path. Unlike Tauri's
-// convertFileSrc (which percent-encodes the WHOLE path into one URL segment,
-// breaking every relative subresource inside the theme), this keeps real
-// directory segments so `./img.jpg` and `fetch('./shaders/x.frag')` resolve.
-function toThemeUrl(fsPath) {
-    // Normalize Windows backslashes to '/' before segmenting. Rust's
-    // app_data_dir returns paths like C:\Users\..\themes\Name, and JS also
-    // concatenates candidates with '/', producing mixed separators. Without
-    // this, the entire theme dir collapses into one percent-encoded segment
-    // (backslashes → %5C) instead of real path segments — which breaks every
-    // relative subresource inside a theme (`./img.jpg`, `fetch('./x.frag')`)
-    // on Windows. Encoding each real segment keeps those relative URLs resolving.
-    const normalized = fsPath.replace(/\\/g, '/');
-    const encoded = normalized.split('/').map(encodeURIComponent).join('/');
-    const lead = encoded.startsWith('/') ? '' : '/';
-    // Windows/Android webviews expose custom schemes as http://<scheme>.localhost
-    return IS_WINDOWS_WEBVIEW
-        ? `http://theme.localhost${lead}${encoded}`
-        : `theme://localhost${lead}${encoded}`;
-}
-
-// Detect the host platform once at module load rather than per-call. The custom
-// scheme host differs by webview (WebView2 on Windows exposes theme://localhost
-// as http://theme.localhost), so this drives every theme URL. Kept as a UA check
-// (reliable on WebView2/WKWebView) to avoid pulling the async os plugin into the
-// synchronous toThemeUrl hot path.
-const IS_WINDOWS_WEBVIEW = typeof navigator !== 'undefined'
-    && /Windows/i.test(navigator.userAgent || '');
 
 // Keep the docked settings panel expanded while a native <select> has its OS
 // popup open. The popup renders outside the panel window's own frame (often
 // above it, since the panel is docked to the screen edge) — without this, the
 // Rust hover-poll loop sees the cursor leave the window bounds mid-selection
-// and collapses the panel, yanking it out from under the open dropdown.
-function setPanelLocked(locked) {
-    invoke('set_settings_panel_locked', { locked }).catch(() => {});
-}
+import { setPanelLocked, POPUP_CONTROLS, initPanelLockDelegation } from './modules/panelLock.js';
 
-// One delegated lock for EVERY control whose native popup can extend beyond
-// the panel window (selects, color pickers) — including controls created
-// dynamically for theme custom_settings, which per-element listeners missed.
-// Lock when the popup could open; unlock only once a value is committed
-// (change) or focus verifiably stays inside the page (the macOS color panel
-// is a separate OS window, so its opening fires blur/focusout — unlocking
-// there would collapse the panel under the open picker).
-const POPUP_CONTROLS = 'select, input[type="color"]';
-function initPanelLockDelegation() {
-    const matches = (t) => t instanceof Element && t.closest(POPUP_CONTROLS);
-    document.addEventListener('mousedown', (e) => { if (matches(e.target)) setPanelLocked(true); }, true);
-    document.addEventListener('focusin',  (e) => { if (matches(e.target)) setPanelLocked(true); });
-    document.addEventListener('change',   (e) => { if (matches(e.target)) setPanelLocked(false); });
-    document.addEventListener('focusout', (e) => {
-        if (!matches(e.target)) return;
-        // Defer one tick: if the document still has focus, the popup closed
-        // (or never opened) and focus merely moved within the panel — safe to
-        // unlock. If an OS-level picker window took focus, keep the lock.
-        setTimeout(() => { if (document.hasFocus()) setPanelLocked(false); }, 0);
-    });
-    // Focus returning to the webview with no popup control active means any
-    // OS picker window closed without committing (e.g. color panel dismissed
-    // with no change event) — release the lock so the panel can collapse.
-    window.addEventListener('focus', () => {
-        const el = document.activeElement;
-        if (!(el instanceof Element) || !el.closest(POPUP_CONTROLS)) setPanelLocked(false);
-    });
-}
 
 // Check and provision default theme inside system AppData on startup
 async function verifyAndProvisionAppData() {
@@ -130,17 +60,7 @@ async function verifyAndProvisionAppData() {
     }
 }
 
-// Set ignore cursor events safely by checking label boundaries
-async function setIgnoreCursor(ignore) {
-    try {
-        const win = getCurrentWindow();
-        if (win.label === 'main') {
-            await win.setIgnoreCursorEvents(ignore);
-        }
-    } catch (e) {
-        console.error("[Novaframe] Failed to set ignore cursor events:", e);
-    }
-}
+
 
 function initDualWindowSystem() {
     const params = new URLSearchParams(window.location.search);
@@ -165,23 +85,8 @@ function initDualWindowSystem() {
         document.body.style.backgroundColor = 'transparent';
         document.documentElement.style.backgroundColor = 'transparent';
         // Apply current theme scope synchronously so the panel starts in the correct mode.
-        applyThemeScope();
+        applyThemeScope(ThemeManager.currentManifest);
     }
-}
-
-// ── Theme Scope Visibility ─────────────────────────────────────────────────
-// Sets <html data-theme-scope="legacy|dynamic"> so #legacySection hide/show is
-// driven entirely by CSS, no inline styles.  Call this whenever a theme loads,
-// falls back, or is set via UI.
-//
-//   legacy  = Novaframe world-map + sun (Internal-Legacy)
-//   dynamic = any external-html / external-canvas theme like Ignis
-function applyThemeScope() {
-    const mode = ThemeManager?.currentManifest?.render_mode === 'internal-legacy'
-        || !ThemeManager?.currentManifest
-        ? 'legacy'
-        : 'dynamic';
-    document.documentElement.dataset.themeScope = mode;
 }
 
 
@@ -216,234 +121,14 @@ const LEGACY_THEME_DEFAULTS = {
     use_gpu_shader: true
 };
 
-const ThemeManager = {
-    currentTheme: { ...LEGACY_THEME_DEFAULTS },
-    currentManifest: null,   // raw parsed engine_manifest.json of active theme (or null)
-    currentIframe: null,     // <iframe> DOM node for external-html mode, else null
-    currentThemePath: null,  // absolute path string of active theme, or null for legacy
-    manifestCache: {},       // in-memory cache for render_mode mapped by themePath
-
-    // Read the theme's manifest from disk. Throws on read failure.
-    async readManifest(themePath) {
-        for (const candidate of ['engine_manifest.json', 'manifest.json']) {
-            const uri = toThemeUrl(`${themePath}/${candidate}`);
-            const res = await fetch(uri);
-            if (res.ok) {
-                const m = await res.json();
-                return { manifest: m, manifestFile: candidate };
-            }
-        }
-        throw new Error(`Manifest not found under ${themePath}`);
-    },
-
-    async loadTheme(themePath, forceReload = false) {
-        if (!themePath) {
-            // No-op if we're already showing a theme
-            if (this.currentThemePath === null && !this.currentManifest) return;
-            // Unmount if empty theme passed
-            this.unmountIframe();
-            this.currentThemePath = null;
-            this.currentManifest = null;
-            setWelcomeVisible(true);
-            return;
-        }
-
-        let parsed;
-        try {
-            parsed = await this.readManifest(themePath);
-        } catch (err) {
-            console.error("[Novaframe] Failed to read theme manifest:", err);
-            return;
-        }
-
-        const manifest = parsed.manifest;
-
-        // Forward-compat guard: refuse to render a theme built for a newer
-        // manifest schema than this engine understands. Better a clear no-op +
-        // console note than a silently broken render.
-        if (manifestNeedsNewerEngine(manifest)) {
-            console.warn(`[Novaframe] Not loading "${manifest.name || themePath}": manifest_version ${manifest.manifest_version} needs a newer engine (supports ${ENGINE_MANIFEST_VERSION}). Update Novaframe.`);
-            return;
-        }
-
-        // Idempotency guard: skip the full render path if the theme is already
-        // active (manifest + path match). Prevents double-mounts when an echo
-        // event re-enters this function before the first call has finished.
-        // Note: requires an already-mounted iframe — a matching path with no
-        // mount (e.g. currentThemePath pre-set by a config writer) must still
-        // render. forceReload bypasses it entirely (refresh button).
-        if (!forceReload && this.currentIframe
-            && themePath === this.currentThemePath
-            && manifest.theme_id === this.currentManifest?.theme_id) {
-            return;
-        }
-
-        const renderMode = manifest.render_mode || 'external-html';
-
-        this.currentManifest = manifest;
-        this.currentThemePath = themePath;
-
-        if (renderMode === 'external-html' || renderMode === 'external-canvas') {
-            await this.loadExternalHtml(themePath, manifest, renderMode);
-        } else {
-            console.error(`[Novaframe] Unknown render_mode "${renderMode}", falling back to external-html`);
-            await this.loadExternalHtml(themePath, manifest, 'external-html');
-        }
-
-        applyThemeScope();
-        await ConfigManager.setTheme(themePath);
-    },
-
-
-    async loadExternalHtml(themePath, manifest) {
-        const entry = manifest.entry || 'index.html';
-        const fileSrc = toThemeUrl(`${themePath}/${entry}`);
-        const transparent = manifest.transparent !== false; // default true
-        this.mountIframe(fileSrc, transparent, themePath);
-    },
-
-    mountIframe(src, transparent, themePath) {
-        this.unmountIframe();
-        setWelcomeVisible(false);
-        const container = document.getElementById('container');
-        if (!container) return;
-        const iframe = document.createElement('iframe');
-        iframe.id = 'themeFrame';
-        iframe.src = src;
-        iframe.setAttribute('allow', 'autoplay; fullscreen');
-        // Security: no allow-same-origin — iframe origin becomes null, so
-        // wallpaper JS cannot access window.__TAURI__, parent DOM, or cookies.
-        // All communication goes through the postMessage bridge below.
-        iframe.setAttribute('sandbox', 'allow-scripts');
-        Object.assign(iframe.style, {
-            position: 'absolute',
-            top: '0', left: '0',
-            width: '100%', height: '100%',
-            border: '0',
-            backgroundColor: transparent ? 'transparent' : '#000',
-            zIndex: '5',
-            pointerEvents: 'auto'
-        });
-
-        // Helper to push the host viewport descriptor to the iframe. The theme
-        // listens for these messages to size its canvas / shaders correctly so
-        // there are no letterbox black bars regardless of screen resolution.
-        const postViewport = (msgType = 'novaframe-theme-ready') => {
-            try {
-                const cw = iframe.contentWindow;
-                if (!cw) return;
-                const w = cw.innerWidth  || container.clientWidth;
-                const h = cw.innerHeight || container.clientHeight;
-                const dpr = cw.devicePixelRatio || window.devicePixelRatio || 1;
-                cw.postMessage({
-                    type: msgType,
-                    transparent,
-                    width: w,
-                    height: h,
-                    dpr
-                }, '*');
-            } catch (e) {}
-        };
-
-        iframe.addEventListener('load', () => {
-            postViewport('novaframe-theme-ready');
-            // Some themes read sizes before their RAFs settle — push once more
-            // after the next paint to be safe.
-            requestAnimationFrame(() => postViewport('novaframe-theme-ready'));
-
-            // Tell the fresh theme whether the wallpaper is currently PAUSED.
-            // `occlusion-change` only fires on a transition, so without this a
-            // theme that mounts (or gets reloaded by the failsafe below) while
-            // paused starts with occluded=false and renders at full rate
-            // forever — invisible, with the tray still reading "Resume".
-            // This was silently burning the GPU on every reload.
-            pushCurrentOcclusion(iframe);
-
-            // Dispatch settings: manifest defaults overlaid with any saved values.
-            // Guarantees a freshly installed theme starts from its manifest
-            // defaults and a returning theme gets the user's saved state.
-            const defaults = {};
-            (ThemeManager.currentManifest?.custom_settings || []).forEach(s => {
-                if (s.default !== undefined) defaults[s.id] = s.default;
-            });
-            const saved = (config.theme_settings && config.theme_settings[themePath]) || {};
-            const settings = { ...defaults, ...saved };
-            if (Object.keys(settings).length > 0) {
-                _lastRelayedSettings = JSON.stringify(settings);
-                try {
-                    iframe.contentWindow.postMessage({
-                        type: 'novaframe-settings',
-                        settings
-                    }, '*');
-                } catch (_) {}
-            }
-        });
-
-        // The settings-panel slide animation resizes the main window. We don't
-        // currently do that, but keep the listener in case future layout
-        // changes cause viewport shifts.
-        const resizeObserver = new ResizeObserver(() => postViewport('novaframe-theme-resize'));
-        resizeObserver.observe(iframe);
-
-        // Save the postViewport closure for cleanup on unmount.
-        iframe._novaframeResizeCleanup = () => resizeObserver.disconnect();
-
-        container.appendChild(iframe);
-        this.currentIframe = iframe;
-    },
-
-    unmountIframe() {
-        if (this.currentIframe) {
-            try { this.currentIframe._novaframeResizeCleanup?.(); } catch (_) {}
-            if (this.currentIframe.parentNode) {
-                this.currentIframe.parentNode.removeChild(this.currentIframe);
-            }
-        }
-        this.currentIframe = null;
-        _lastRelayedSettings = null;
-    }
-};
-
-// ── Occlusion state push ───────────────────────────────────────────────────
-// The engine emits `occlusion-change` only when the state CHANGES, so a theme
-// iframe that mounts afterwards never hears about a pause that is already in
-// effect. Query the authoritative value from Rust and push it into the frame.
-// `_lastKnownOccluded` is the fallback if the command isn't available.
-let _lastKnownOccluded = false;
-async function pushCurrentOcclusion(iframe) {
-    let occluded = _lastKnownOccluded;
-    try {
-        occluded = await invoke('get_wallpaper_paused');
-    } catch (e) {
-        console.warn('[Novaframe] get_wallpaper_paused unavailable, using cached state', e);
-    }
-    _lastKnownOccluded = occluded;
-    try {
-        iframe?.contentWindow?.postMessage({ type: 'novaframe-occlusion', occluded }, '*');
-    } catch (_) {}
-}
-
-// ── Live settings relay (main window) ──────────────────────────────────────
-// Forward the active theme's saved settings to the wallpaper iframe. Called
-// whenever config changes (event from the settings window, or store poll).
-// Sends the FULL settings object — themes treat every message as a partial
-// patch, so resending unchanged keys is harmless and keeps this generic.
-let _lastRelayedSettings = null;
-function relayThemeSettingsToIframe() {
-    const tp = ThemeManager.currentThemePath;
-    const cw = ThemeManager.currentIframe?.contentWindow;
-    if (!tp || !cw) return;
-    const settings = config.theme_settings?.[tp];
-    if (!settings) return;
-    const serialized = JSON.stringify(settings);
-    if (serialized === _lastRelayedSettings) return; // dedupe
-    _lastRelayedSettings = serialized;
-    try {
-        cw.postMessage({ type: 'novaframe-settings', settings }, '*');
-    } catch (_) {}
-}
-
-
+import {
+    ThemeManager,
+    applyThemeScope,
+    pushCurrentOcclusion,
+    relayThemeSettingsToIframe,
+    getLastKnownOcclusion,
+    setLastKnownOcclusion
+} from './modules/themeManager.js';
 
 // ── Mouse passthrough to iframe (for interactive themes like Ignis) ────────
 window.addEventListener('mousemove', (e) => {
@@ -453,36 +138,27 @@ window.addEventListener('mousemove', (e) => {
         iframe.contentWindow.postMessage({
             type: 'novaframe-pointer',
             x: e.clientX, y: e.clientY,
-            // Normalized 0-1 for theme authors
             nx: e.clientX / window.innerWidth,
             ny: e.clientY / window.innerHeight
         }, '*');
     } catch (_) {}
 });
 
+
 // ── Constants & Configuration ──────────────────────────────────────────────
 
 // ── State Persistence Configurations (ConfigManager) ───────────────────────
-const DEFAULT_CONFIG = {
-    shadowOpacity: 55,
-    showAnalemma: true,
-    pinnedLocations: [
-        { name: "London", lat: 51.5074, lon: -0.1278 },
-        { name: "New York", lat: 40.7128, lon: -74.0060 },
-        { name: "Hong Kong", lat: 22.3193, lon: 114.1694 }
-    ],
-    theme_settings: {},
-    // Cycle through installed wallpapers instead of sitting on one.
-    rotation_enabled: false,
-    rotation_interval_min: 60,
-    // Suspend the render when unplugged. Off by default — a wallpaper that
-    // disappears on unplug reads as a crash unless it was asked for.
-    pause_on_battery: false,
-    // First-run orientation overlay: shown once, then never again.
-    onboarding_seen: false
-};
+import {
+    DEFAULT_CONFIG,
+    getConfig,
+    setConfig,
+    patchConfig,
+    getThemeSettings,
+    setThemeSettings
+} from './modules/state.js';
 
-let config = DEFAULT_CONFIG;
+let config = getConfig();
+
 
 const ConfigManager = {
     store: null,
@@ -511,7 +187,7 @@ const ConfigManager = {
                 await this.store.save();
             }
             
-            config = (await this.store.get('novaframe_config')) || DEFAULT_CONFIG;
+            config = setConfig((await this.store.get('novaframe_config')) || DEFAULT_CONFIG);
 
             // Only the main window needs to poll the store for cross-window
             // config/theme changes. The settings window wrote the change — it
@@ -522,7 +198,7 @@ const ConfigManager = {
                 setInterval(async () => {
                     const latestConfig = await this.store.get('novaframe_config');
                     if (latestConfig) {
-                        config = latestConfig;
+                        config = setConfig(latestConfig);
                         relayThemeSettingsToIframe();
                     }
 
@@ -539,10 +215,11 @@ const ConfigManager = {
 
         } catch (e) {
             console.error("[ConfigManager] Native store failed:", e);
-            config = JSON.parse(localStorage.getItem('novaframe_config')) || DEFAULT_CONFIG;
+            config = setConfig(JSON.parse(localStorage.getItem('novaframe_config')) || DEFAULT_CONFIG);
         }
     },
     async saveConfig() {
+        config = setConfig(config);
         if (this.store) {
             await this.store.set('novaframe_config', config);
             await this.store.save();
@@ -739,7 +416,8 @@ function updateSettingsScope(themePath) {
                             ThemeManager.currentIframe.contentWindow.postMessage({
                                 type: 'novaframe-settings',
                                 settings: { [setting.id]: true }
-                            }, window.location.origin);
+                            }, '*');
+
                         }
                         
                         // Broadcast to other windows (specifically the background underlay window)
@@ -823,45 +501,49 @@ function updateSettingsScope(themePath) {
 
 // ── Bind UI Event Listeners ───────────────────────────────────────────────
 async function initSettingsUI() {
-    // 1. Scan and cache all available themes
-    await scanThemes();
-    
-    // 2. Fetch active theme from store
-    const activeTheme = await ConfigManager.getTheme();
-    console.log("[Novaframe] Active theme from config:", activeTheme);
-    const selector = document.getElementById('themeSelector');
-    if (activeTheme && selector) {
-        selector.value = activeTheme;
-    }
-    
-    // 3. Synchronously apply UI layout scoping
-    updateSettingsScope(activeTheme);
-
-    // 4. Wire the exit button — fully quits the engine so the user never needs
-    // Task Manager. The in-panel confirm keeps the panel locked open while up
-    // (see modalInPanel) so the hover-poll loop can't collapse it mid-dialog.
+    // 1. Wire the exit button — fully quits the engine so the user never needs Task Manager
     const quitBtn = document.getElementById('quitEngineBtn');
-
     if (quitBtn) {
         quitBtn.addEventListener('click', async () => {
-            // Native confirm() centers in the ~360px settings window, pushing its
-            // OK button off-screen. Use an in-panel modal that fits the width.
-            const ok = await confirmInPanel(
-                'Close Novaframe Engine? Your wallpaper will stop until you reopen it.',
-                'Close Engine'
-            );
-            if (!ok) return;
+            console.log('[Novaframe] Exit button clicked — quitting engine');
             try {
                 await invoke('quit_engine');
             } catch (err) {
-                console.error('[Novaframe] quit_engine invoke failed, falling back to process.exit:', err);
-                try { await processExit(0); } catch (_) {}
+                console.error('[Novaframe] quit_engine invoke failed:', err);
             }
         });
     }
 
-    // 5. Wire the "Launch on startup" toggle — reflects the real OS state and
-    // writes changes through the Rust set_autostart command.
+    // 2. Wire the Browse Marketplace and reload buttons
+    const selector = document.getElementById('themeSelector');
+    if (selector) {
+        selector.addEventListener('change', async (e) => {
+            const selected = e.target.value;
+            await ConfigManager.setTheme(selected);
+        });
+    }
+
+    const refreshBtn = document.getElementById('refreshThemeBtn');
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', async () => {
+            try { await emit('theme-reload'); } catch (_) {
+                if (ThemeManager.currentThemePath) {
+                    ThemeManager.loadTheme(ThemeManager.currentThemePath, true);
+                }
+            }
+        });
+    }
+
+    const openStoreBtn = document.getElementById('openStoreBtn');
+    if (openStoreBtn) {
+        openStoreBtn.addEventListener('click', async () => {
+            await invoke('open_storefront_window').catch(err =>
+                console.error("[Novaframe] open_storefront_window failed:", err)
+            );
+        });
+    }
+
+    // 3. Wire the "Launch on startup" toggle
     const autostartToggle = document.getElementById('autostartToggle');
     if (autostartToggle) {
         try {
@@ -875,16 +557,26 @@ async function initSettingsUI() {
                 await invoke('set_autostart', { enabled });
             } catch (err) {
                 console.error('[Novaframe] set_autostart failed:', err);
-                // Revert the UI if the OS call failed.
                 e.target.checked = !enabled;
             }
         });
     }
 
-    // 6. Library management, rotation and power controls.
+    // 4. Library management, rotation and power controls
     initDeleteThemeButton();
     initBatterySaverToggle();
     initRotationControls();
+
+    // 5. Scan available themes and update active theme selection
+    await scanThemes();
+    
+    const activeTheme = await ConfigManager.getTheme();
+    console.log("[Novaframe] Active theme from config:", activeTheme);
+    if (activeTheme && selector) {
+        selector.value = activeTheme;
+    }
+    
+    updateSettingsScope(activeTheme);
 }
 
 // ── Library management ─────────────────────────────────────────────────────
@@ -1033,12 +725,11 @@ async function scanThemes() {
         
         // Read all manifests in parallel — sequential awaits made panel-open
         // latency scale linearly with installed theme count.
-        const themeDirs = entries.filter(entry => {
-            const isDir = entry.isDirectory === true || Array.isArray(entry.children);
-            // Skip dotfolders — e.g. the transient `.staging-<id>` dir the Rust
-            // installer uses mid-install. They aren't user themes.
-            return isDir && entry.name && !entry.name.startsWith('.');
-        });
+        const themeDirs = entries.filter(entry => entry?.name && !entry.name.startsWith('.'));
+        if (themeDirs.length === 0 && entries.length > 0) {
+            console.warn('[Novaframe] scanThemes: every entry was filtered out', entries);
+        }
+
         const scanned = await Promise.all(themeDirs.map(async (entry) => {
             const themePath = `${themesDir}/${entry.name}`;
             try {
@@ -1050,24 +741,27 @@ async function scanThemes() {
                     console.warn(`[Novaframe] Skipping "${manifest.name || entry.name}": manifest_version ${manifest.manifest_version} needs a newer engine (supports ${ENGINE_MANIFEST_VERSION}).`);
                     return null;
                 }
+                const renderMode = manifest.render_mode || 'external-html';
                 return {
                     themePath,
                     label: manifest.name || entry.name,
-                    mode: manifest.render_mode || 'external-html',
+                    mode: renderMode,
+                    render_mode: renderMode,
                     custom_settings: manifest.custom_settings || null,
                     // Used by checkThemeContentUpdates: theme_id is the
                     // marketplace wallpaper UUID, version the installed build.
                     theme_id: manifest.theme_id || null,
                     version: manifest.version || null
                 };
-            } catch (_) {
+            } catch (scanErr) {
+                console.warn("[Novaframe] scanThemes skipped directory:", themePath, scanErr);
                 return null;
             }
         }));
         for (const t of scanned) {
             if (!t) continue;
-            const { themePath, label, mode, custom_settings, theme_id, version } = t;
-            ThemeManager.manifestCache[themePath] = { label, mode, custom_settings, theme_id, version };
+            const { themePath, label, mode, render_mode, custom_settings, theme_id, version } = t;
+            ThemeManager.manifestCache[themePath] = { label, mode, render_mode, custom_settings, theme_id, version };
 
             const option = document.createElement('option');
             option.value = themePath;
@@ -1103,11 +797,6 @@ async function scanThemes() {
                 }
             }
             await ConfigManager.setTheme(targetTheme);
-            // Only the main window mounts the wallpaper iframe. Loading here in
-            // the settings window would render a hidden copy of the theme
-            // (container is display:none but the iframe still runs its WebGL
-            // loop), doubling GPU/CPU cost. The main window picks the change up
-            // via its store poll / theme-changed event.
             const inSettingsWindow = window.location.search.includes('mode=settings');
             if (!inSettingsWindow) {
                 ThemeManager.loadTheme(targetTheme);
@@ -1117,46 +806,6 @@ async function scanThemes() {
     } catch (e) {
         console.error("[Novaframe] scanThemes failed:", e);
     }
-    
-    // Reload button: remount the active wallpaper in the main window. Useful
-    // when a theme's WebGL context wedges. Emits to all windows; only the main
-    // window listens (theme-reload handler in DOMContentLoaded).
-    const refreshBtn = document.getElementById('refreshThemeBtn');
-    if (refreshBtn) {
-        refreshBtn.addEventListener('click', async () => {
-            try { await emit('theme-reload'); } catch (_) {
-                if (ThemeManager.currentThemePath) {
-                    ThemeManager.loadTheme(ThemeManager.currentThemePath, true);
-                }
-            }
-        });
-    }
-
-    const openStoreBtn = document.getElementById('openStoreBtn');
-    if (openStoreBtn) {
-        openStoreBtn.addEventListener('click', async () => {
-            await invoke('open_storefront_window').catch(err =>
-                console.error("[Novaframe] open_storefront_window failed:", err)
-            );
-        });
-    }
-
-    // NOTE: the `engine-apply-theme` deep-link listener used to be registered
-    // here. It was moved to module scope (registerEngineApplyListener) so it is
-    // registered exactly once — this function re-runs on every reload and can
-    // early-return/throw before reaching this point, which on Windows left the
-    // deep link either unhandled (blank dropdown) or handled by a stale/duplicate
-    // listener racing a concurrent install.
-
-    // Panel locking while the native dropdown popup is open is handled by
-    // the delegated listeners in initPanelLockDelegation().
-    selector.addEventListener('change', async (e) => {
-        const selected = e.target.value;
-        // Persist + broadcast. The broadcast fans out to all windows; the
-        // settings-window listener will update its own dropdown highlight +
-        // scope when it echoes back. The main-window listener will re-render.
-        await ConfigManager.setTheme(selected);
-    });
 }
 
 // Width-constrained replacement for window.alert()/confirm(). Native dialogs
@@ -1295,74 +944,20 @@ function registerEngineApplyListener() {
         const TAG = '[Main]';
         const stamp = `[${Date.now() % 100000}]`;
         const token = event?.payload;
-        console.log(TAG, stamp, 'engine-apply-theme listener fired. payload type:', typeof token, 'length:', token?.length ?? 'null');
-        console.log("[Novaframe] Received apply theme request from deep link with token:", token);
+        console.log(TAG, stamp, 'engine-apply-theme listener fired with token len:', token?.length ?? 0);
 
         try {
-            // Hardware fingerprint for device-locked purchases. If the Rust
-            // command fails we still verify — the backend treats a missing
-            // hardwareId as a legacy client and skips enforcement.
-            let hardwareId = null;
-            try {
-                hardwareId = await invoke('get_hardware_id');
-            } catch (hwErr) {
-                console.error(TAG, stamp, 'get_hardware_id failed:', hwErr);
-            }
+            const installedThemeId = await invoke('handle_engine_apply', { token });
+            console.log(TAG, stamp, `✅ Rust handle_engine_apply returned dir=${installedThemeId}`);
 
-            console.log(TAG, stamp, 'POST /api/engine/verify-token ...');
-            const response = await fetch('https://api.novaframe.co.uk/api/engine/verify-token', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ token, hardwareId })
-            });
-            console.log(TAG, stamp, 'verify-token responded with HTTP', response.status);
-
-            const data = await response.json();
-
-            if (response.ok && data.success) {
-                const wallpaperId = data.wallpaper.id;
-                const downloadUrl = data.wallpaper.downloadUrl;
-                const wallpaperTitle = data.wallpaper.title;
-                console.log(TAG, stamp, 'verify-token OK. wallpaperId=', wallpaperId, 'title=', JSON.stringify(wallpaperTitle), 'downloadUrl length=', downloadUrl?.length ?? 0);
-
-                // Call the Rust command to download and install the theme
-                console.log(TAG, stamp, `Invoking Rust download_and_install_theme themeId=${wallpaperId} title=${wallpaperTitle} ...`);
-                let installedThemeId;
-                try {
-                    // Tauri v2 serializes Rust function arguments as camelCase on the
-                    // JS side. Rust declares `theme_id` / `wallpaper_title` but the JS
-                    // keys must be camelCase: `themeId` / `wallpaperTitle`.
-                    installedThemeId = await invoke('download_and_install_theme', {
-                        url: downloadUrl,
-                        themeId: wallpaperId,
-                        wallpaperTitle: wallpaperTitle
-                    });
-                    console.log(TAG, stamp, `✅ Rust install returned dir=${installedThemeId}`);
-                } catch (rustErr) {
-                    console.error(TAG, stamp, '❌ Rust download_and_install_theme rejected:', rustErr);
-                    await alertInPanel('Engine install command rejected: ' + (rustErr?.message ?? rustErr));
-                    return;
-                }
-
-                console.log(`[Novaframe] Theme ${installedThemeId} installed successfully! Loading it...`);
-
-                // Rust emits `theme-installed` on success, which both windows already
-                // listen for (that handler sets the theme + reloads). Setting it here
-                // too is harmless (idempotent) and keeps the flow working even if the
-                // event is missed.
-                const themesDir = await getThemesDir();
-                const absoluteThemePath = `${themesDir}/${installedThemeId}`;
-                await ConfigManager.setTheme(absoluteThemePath);
-                console.log(TAG, stamp, 'ConfigManager.setTheme ok.');
-            } else {
-                console.error(TAG, stamp, 'verify-token returned !ok || !success:', data);
-                console.error("Token verification failed:", data.error);
-                await alertInPanel(friendlyApiError(data));
-            }
+            const themesDir = await getThemesDir();
+            const absoluteThemePath = `${themesDir}/${installedThemeId}`;
+            await ConfigManager.setTheme(absoluteThemePath);
+            console.log(TAG, stamp, 'ConfigManager.setTheme ok.');
         } catch (err) {
-            console.error(TAG, stamp, '❌ exception in listener:', err);
-            console.error("Error verifying token:", err);
-            await alertInPanel("Error verifying license token.");
+            console.error(TAG, stamp, '❌ handle_engine_apply failed:', err);
+            const msg = typeof err === 'string' ? err : (err?.message ?? 'License verification failed.');
+            await alertInPanel(msg);
         }
     });
 }
@@ -1403,43 +998,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     await ConfigManager.init();
     initDualWindowSystem();
 
-    // Settings UI only exists in the settings (controls) window. Mounting
-    // it on the main window would render an unused overlay whose cog is
-    // also unreachable behind the wallpaper iframe.
-    const isSettingsWindow = window.location.search.includes('mode=settings');
-    if (isSettingsWindow) {
+    // Deep-link listener must always be live — Rust emits to ALL windows
+    registerEngineApplyListener();
+
+    if (isSettingsWindow()) {
         initSettingsUI();
-        // Exactly one window handles the deep-link download/install; the
-        // settings window is always alive (never destroyed/collapsed away)
-        // and is the one the marketplace deep link focuses. Registering in
-        // both windows would race the same install.
-        registerEngineApplyListener();
     }
 
     // Inter-window event triggers
     listen('theme-changed', async (event) => {
         const newTheme = event.payload || null;
-        const isMainWindow = window.location.search.includes('mode=main');
 
-        if (isMainWindow) {
-            // Skip if theme hasn't actually changed — guards against
-            // echo loops where the same window receives its own broadcast
-            // back. ThemeManager.loadTheme has its own idempotency guard.
+        if (isMainWindow()) {
             if (newTheme === ThemeManager.currentThemePath) return;
             ThemeManager.loadTheme(newTheme);
         } else {
-            // Settings window: ALWAYS mirror the new state. Echoes are
-            // cheap here because we never touch the iframe / canvases.
             ThemeManager.currentThemePath = newTheme;
             updateSettingsScope(newTheme);
         }
     });
 
-    // Refresh button in the settings panel: hard-remount the active
-    // theme's iframe (main window only — settings window has no mount).
     listen('theme-reload', () => {
-        const isMainWindow = window.location.search.includes('mode=main');
-        if (isMainWindow && ThemeManager.currentThemePath) {
+        if (isMainWindow() && ThemeManager.currentThemePath) {
             ThemeManager.loadTheme(ThemeManager.currentThemePath, true);
         }
     });
@@ -1448,11 +1028,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const absoluteThemePath = event.payload;
         console.log("[Novaframe] Received theme-installed event with path:", absoluteThemePath);
         await ConfigManager.setTheme(absoluteThemePath);
-        // Main window: swap the theme in place — no full reload, so the
-        // fullscreen underlay never repaints bare HTML (was the source of
-        // the settings-panel flash). Settings window still reloads so
-        // scanThemes() re-runs and the dropdown picks up the new theme.
-        if (isSettingsWindow) {
+        if (isSettingsWindow()) {
             window.location.reload();
         } else {
             ThemeManager.loadTheme(absoluteThemePath);
@@ -1461,8 +1037,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     listen('config-changed', (event) => {
         if (event.payload) {
-            config = event.payload;
-            relayThemeSettingsToIframe();
+            config = setConfig(event.payload);
+            relayThemeSettingsToIframe(ThemeManager.currentThemePath, ThemeManager.currentIframe, config);
         }
     });
 
@@ -1476,31 +1052,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
-    // Sleep Failsafe
-    // When the OS goes to sleep, the WebGL context in the iframe is often lost or frozen.
-    // A delta-time interval detects if the CPU actually slept (e.g. >5 seconds passed between 1s intervals).
-    // Main window only — the settings window never mounts an iframe,
-    // so its copy of this timer was pure waste.
-    //
-    // CAUTION: a late timer is NOT proof of sleep. This window lives under
-    // WorkerW and is never foreground, so the browser throttles its timers
-    // — a busy machine can overshoot 5s with no sleep involved. Each false
-    // positive reloads the theme, which re-creates the WebGL context and
-    // re-uploads its textures (iss-window decodes a 4096x2048 base64 Blue
-    // Marble and regenerates mipmaps). Two guards below:
-    //   1. Never reload while the wallpaper is paused — there is no live
-    //      context to rescue, and the reloaded theme would come back up
-    //      rendering. (`pushCurrentOcclusion` on load covers the case
-    //      where a reload does happen, but not reloading is cheaper.)
-    //   2. Raised threshold + a real log line, so a reload loop is
-    //      visible in the console instead of silent.
     let lastTick = Date.now();
     const SLEEP_GAP_MS = 20000;
-    if (!isSettingsWindow) setInterval(() => {
+    if (isMainWindow()) setInterval(() => {
+
         const now = Date.now();
         const gap = now - lastTick;
         if (gap > SLEEP_GAP_MS) {
-            if (_lastKnownOccluded) {
+            if (getLastKnownOcclusion()) {
                 console.log(`[Novaframe] timer gap ${gap}ms while paused — skipping iframe reload`);
             } else if (ThemeManager.currentIframe) {
                 console.log(`[Novaframe] timer gap ${gap}ms — reloading iframe to restore WebGL context`);
@@ -1519,7 +1078,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const isVisible = event.payload;
         // Cache it so a theme mounted later can be told without a round
         // trip, and so the sleep failsafe can skip pointless reloads.
-        _lastKnownOccluded = !isVisible;
+        setLastKnownOcclusion(!isVisible);
         // Broadcast to external themes so they can pause their render loops
         if (ThemeManager.currentIframe?.contentWindow) {
             try {
@@ -1533,75 +1092,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 
-// Auto-Updater Integration
+import {
+    relaunchApp,
+    checkAndInstallUpdate,
+    setWelcomeVisible,
+    showOnboardingOnce,
+    checkThemeContentUpdates
+} from './modules/updater.js';
+
+// Auto-Updater Integration DOM Bindings
 const updateBtn = document.getElementById('updateBtn');
 const updateStatus = document.getElementById('updateStatus');
 const updateRestartBanner = document.getElementById('updateRestartBanner');
 const updateRestartBtn = document.getElementById('updateRestartBtn');
-
-async function relaunchApp() {
-    await relaunch();
-}
-
-// Shared check/download/install. silent=true: no status text unless an update
-// is actually found and installed, in which case the restart banner appears
-// instead of force-relaunching (decisions 2-3 in the distribution plan).
-// silent=false (manual button): verbose progress + auto-relaunch as before.
-let updateInstalledPendingRestart = false;
-
-async function checkAndInstallUpdate({ silent }) {
-    const setStatus = (text, color) => {
-        if (silent || !updateStatus) return;
-        updateStatus.innerText = text;
-        if (color) updateStatus.style.color = color;
-    };
-
-    if (updateInstalledPendingRestart) {
-        // Already downloaded and installed this session — just needs a restart.
-        setStatus('Update ready — restart to apply.', '#10b981');
-        return;
-    }
-
-    const update = await updaterCheck();
-    if (!update) {
-        setStatus('You are on the latest version.', '#10b981');
-        return;
-    }
-
-    setStatus(`Update found: v${update.version}. Downloading...`, '#3b82f6');
-    let downloaded = 0;
-    let contentLength = 0;
-
-    await update.downloadAndInstall((event) => {
-        switch (event.event) {
-            case 'Started':
-                contentLength = event.data.contentLength;
-                setStatus('Downloading... 0%');
-                break;
-            case 'Progress':
-                downloaded += event.data.chunkLength;
-                if (contentLength) {
-                    const percent = Math.round((downloaded / contentLength) * 100);
-                    setStatus(`Downloading... ${percent}%`);
-                }
-                break;
-            case 'Finished':
-                setStatus('Installing...');
-                break;
-        }
-    });
-
-    updateInstalledPendingRestart = true;
-
-    if (silent) {
-        // Background update: don't yank the app out from under the user.
-        console.log(`[Updater] v${update.version} installed in background; awaiting restart.`);
-        if (updateRestartBanner) updateRestartBanner.style.display = 'block';
-    } else {
-        setStatus('Update installed! Restarting...', '#10b981');
-        setTimeout(relaunchApp, 1500);
-    }
-}
 
 if (updateRestartBtn) {
     updateRestartBtn.addEventListener('click', relaunchApp);
@@ -1610,18 +1113,22 @@ if (updateRestartBtn) {
 if (updateBtn) {
     updateBtn.addEventListener('click', async () => {
         try {
-            updateStatus.innerText = 'Checking for updates...';
-            updateStatus.style.color = '#888';
+            if (updateStatus) {
+                updateStatus.innerText = 'Checking for updates...';
+                updateStatus.style.color = '#888';
+            }
             updateBtn.disabled = true;
             await checkAndInstallUpdate({ silent: false });
         } catch (error) {
             console.error('Update error:', error);
-            updateStatus.innerText = `Update failed: ${error}`;
-            updateStatus.style.color = '#ef4444';
+            if (updateStatus) {
+                updateStatus.innerText = `Update failed: ${error}`;
+                updateStatus.style.color = '#ef4444';
+            }
         } finally {
             updateBtn.disabled = false;
             setTimeout(() => {
-                if (updateStatus.innerText.includes('latest version') || updateStatus.innerText.includes('failed')) {
+                if (updateStatus && (updateStatus.innerText.includes('latest version') || updateStatus.innerText.includes('failed'))) {
                     updateStatus.innerText = '';
                 }
             }, 5000);
@@ -1629,108 +1136,55 @@ if (updateBtn) {
     });
 }
 
-// ── First-run welcome overlay (main window) ────────────────────────────────
-// The main window is click-through, so the overlay only points the user at
-// the interactive right-edge settings tab; it can't hold buttons itself.
-function setWelcomeVisible(visible) {
-    const overlay = document.getElementById('welcomeOverlay');
-    if (!overlay) return;
-    const isMainWindow = (new URLSearchParams(window.location.search).get('mode') || 'main') === 'main';
-    overlay.style.display = visible && isMainWindow ? 'flex' : 'none';
-}
-
-// ── First-run orientation (main window) ────────────────────────────────────
-// Shown once per install. The main window is click-through and has no dock
-// icon, so a new user genuinely cannot find the app without being told — but
-// being told twice is nagging, hence the persisted flag.
-async function showOnboardingOnce() {
-    const overlay = document.getElementById('onboardingOverlay');
-    if (!overlay) return;
-    if (config.onboarding_seen === true) return;
-
-    config.onboarding_seen = true;
-    await ConfigManager.saveConfig();
-
-    overlay.style.display = 'flex';
-    // Next frame, so the opacity transition has a start value to animate from.
-    requestAnimationFrame(() => { overlay.style.opacity = '1'; });
-
+// Automatic background check execution
+if (isSettingsWindow()) {
+    const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    const silentCheck = () => checkAndInstallUpdate({ silent: true })
+        .catch(err => console.error('[Updater] background check failed:', err));
+    const themeCheck = () => checkThemeContentUpdates(ThemeManager.getInstalledManifests())
+        .catch(err => console.error('[ThemeUpdates] background check failed:', err));
+    setTimeout(silentCheck, 60 * 1000);
+    setInterval(silentCheck, AUTO_CHECK_INTERVAL_MS);
+    setTimeout(themeCheck, 20 * 1000);
+    setInterval(themeCheck, AUTO_CHECK_INTERVAL_MS);
+} else {
     setTimeout(() => {
-        overlay.style.opacity = '0';
-        setTimeout(() => { overlay.style.display = 'none'; }, 700);
-    }, 9000);
-}
-
-// ── Theme content updates ───────────────────────────────────────────────────
-// Asks the backend which installed themes have a newer build published
-// (compares manifest.version against wallpapers.engine_manifest.version).
-// Refreshing still goes through the normal Vault re-apply flow — this only
-// surfaces the notice; it never downloads anything itself.
-async function checkThemeContentUpdates() {
-    const notice = document.getElementById('themeUpdatesNotice');
-    if (!notice) return;
-
-    const installed = Object.values(ThemeManager.manifestCache)
-        .filter(m => m.theme_id)
-        .map(m => ({ id: m.theme_id, version: m.version || '' }));
-    if (installed.length === 0) return;
-
-    try {
-        const res = await fetch('https://api.novaframe.co.uk/api/engine/check-theme-updates', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ themes: installed }),
-        });
-        if (!res.ok) return;
-        const { updates } = await res.json();
-        if (!Array.isArray(updates) || updates.length === 0) {
-            notice.style.display = 'none';
-            return;
+        if (!ThemeManager.currentManifest) {
+            setWelcomeVisible(true);
+        } else {
+            showOnboardingOnce(config, () => ConfigManager.saveConfig());
         }
-        // Build with DOM nodes, not innerHTML — titles come from the server and
-        // must never be interpreted as markup inside the settings webview.
-        const names = updates.map(u => u.title || u.id).join(', ');
-        notice.textContent = '';
-        const strong = document.createElement('strong');
-        strong.textContent = 'Wallpaper update available:';
-        notice.append(strong, ` ${names}. Open the Marketplace, go to `,
-            Object.assign(document.createElement('strong'), { textContent: 'My Vault' }),
-            ' and hit Apply to refresh.');
-        notice.style.display = 'block';
-    } catch (err) {
-        console.log('[ThemeUpdates] check failed (offline?):', err);
-    }
+    }, 2500);
 }
 
-// Automatic background check: ~1 min after launch, then every 24h.
-// Runs only in the settings webview (mode=settings) so exactly one window
-// polls, and the restart banner is in the panel the user actually sees.
-{
-    const mode = new URLSearchParams(window.location.search).get('mode') || 'main';
-    if (mode === 'settings') {
-        const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
-        const silentCheck = () => checkAndInstallUpdate({ silent: true })
-            .catch(err => console.error('[Updater] background check failed:', err));
-        const themeCheck = () => checkThemeContentUpdates()
-            .catch(err => console.error('[ThemeUpdates] background check failed:', err));
-        setTimeout(silentCheck, 60 * 1000);
-        setInterval(silentCheck, AUTO_CHECK_INTERVAL_MS);
-        // Theme scan must have populated manifestCache first — scanThemes runs
-        // during initSettingsUI, well before this fires.
-        setTimeout(themeCheck, 20 * 1000);
-        setInterval(themeCheck, AUTO_CHECK_INTERVAL_MS);
-    } else {
-        // Main window. Two different first-run cases:
-        //   nothing mounted  → the old "no wallpapers installed" instructions
-        //   something mounted → since 0.3.8 that's the bundled default theme on
-        //                       a fresh install, and the user still has no idea
-        //                       where the app lives. Orient them once.
-        setTimeout(() => {
-            if (!ThemeManager.currentManifest) {
-                setWelcomeVisible(true);
-            } else {
-                showOnboardingOnce();
-            }
-        }, 2500);
+// ── Global DOM Click Diagnostic Listener ──────────────────────────────────────
+document.addEventListener('click', (e) => {
+    const targetId = e.target.id || e.target.tagName || 'unknown';
+    invoke('log_from_js', {
+        message: `[DOM-CLICK] target=${targetId} mode=${getMode()}`
+    }).catch(() => {});
+}, true);
+
+// ── Top-level fail-open control wiring ──────────────────────────────────────
+function wireCriticalControls() {
+    const quitBtn = document.getElementById('quitEngineBtn');
+    if (quitBtn && !quitBtn._wired) {
+        quitBtn._wired = true;
+        quitBtn.addEventListener('click', async () => {
+            invoke('log_from_js', { message: '[CLICK] quitEngineBtn clicked' }).catch(() => {});
+            try { await invoke('quit_engine'); }
+            catch (err) { console.error('[Novaframe] quit_engine failed:', err); }
+        });
+    }
+    const openStoreBtn = document.getElementById('openStoreBtn');
+    if (openStoreBtn && !openStoreBtn._wired) {
+        openStoreBtn._wired = true;
+        openStoreBtn.addEventListener('click', async () => {
+            invoke('log_from_js', { message: '[CLICK] openStoreBtn clicked' }).catch(() => {});
+            try { await invoke('open_storefront_window'); }
+            catch (err) { console.error('[Novaframe] open_storefront_window failed:', err); }
+        });
     }
 }
+wireCriticalControls();
+

@@ -117,6 +117,78 @@ fn get_hardware_id() -> Result<String, String> {
     machine_uid::get().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn handle_engine_apply(app: tauri::AppHandle, token: String) -> Result<String, String> {
+    let hardware_id = machine_uid::get().ok();
+    dlog(&app, &format!("[engine-apply] starting verification for token len={}", token.len()));
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("HTTP client init failed: {}", e))?;
+
+    let payload = serde_json::json!({
+        "token": token,
+        "hardwareId": hardware_id
+    });
+
+    let res = client
+        .post("https://api.novaframe.co.uk/api/engine/verify-token")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("License verification network request failed: {}", e))?;
+
+    let status = res.status();
+    let body_text = res.text().await.unwrap_or_default();
+    dlog(&app, &format!("[engine-apply] verify-token status={} body_len={}", status, body_text.len()));
+
+    if !status.is_success() {
+        return Err(format!("Server error HTTP {}: {}", status, body_text));
+    }
+
+    let data: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|e| format!("Invalid server response: {}", e))?;
+
+    if !data.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let err_msg = data.get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("License verification failed");
+        return Err(err_msg.to_string());
+    }
+
+    let wallpaper = data.get("wallpaper").ok_or("Missing wallpaper details in response")?;
+    let wallpaper_id = wallpaper.get("id").and_then(|v| v.as_str()).ok_or("Missing wallpaper id")?.to_string();
+    let download_url = wallpaper.get("downloadUrl").and_then(|v| v.as_str()).ok_or("Missing download url")?.to_string();
+    let wallpaper_title = wallpaper.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    download_and_install_theme(app, download_url, wallpaper_id, wallpaper_title).await
+}
+
+#[tauri::command]
+async fn check_theme_updates_rust(themes: serde_json::Value) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let res = client
+        .post("https://api.novaframe.co.uk/api/engine/check-theme-updates")
+        .json(&serde_json::json!({ "themes": themes }))
+        .send()
+        .await
+        .map_err(|e| format!("Network request failed: {}", e))?;
+
+    if !res.status().is_success() {
+        return Err(format!("HTTP {}", res.status()));
+    }
+
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    Ok(json)
+}
+
 // ── Autostart (launch on login) ─────────────────────────────────────────────
 #[tauri::command]
 fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
@@ -223,6 +295,7 @@ fn expand_settings_panel(window: tauri::WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         place_settings_window(&window, &monitor, 360.0, 650.0); // 320 panel + 40 cog tab
     }
+    let _ = window.set_focus();
 }
 
 #[tauri::command]
@@ -1828,7 +1901,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, get_themes_dir, get_hardware_id, set_autostart, get_autostart, get_wallpaper_paused, delete_theme, set_battery_saver])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, handle_engine_apply, check_theme_updates_rust, get_themes_dir, get_hardware_id, set_autostart, get_autostart, get_wallpaper_paused, delete_theme, set_battery_saver])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }

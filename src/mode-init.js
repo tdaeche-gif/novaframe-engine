@@ -8,3 +8,4 @@
 // Extracted from index.html inline script so script-src 'self' CSP allows it.
 document.documentElement.dataset.mode =
     new URLSearchParams(location.search).get('mode') || 'main';
+
