@@ -1,6 +1,11 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod state;
+mod system;
+mod theme_protocol;
+
+use state::*;
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
@@ -9,55 +14,7 @@ use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
 use objc2_foundation::{NSPoint, NSRect};
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 use std::time::Instant;
-
-static LAST_DEEPLINK_SEEN: Mutex<Option<(String, Instant)>> = Mutex::new(None);
-static PENDING_DEEPLINK_TOKEN: Mutex<Option<String>> = Mutex::new(None);
-
-// Set while a native control (e.g. the theme <select>) has an open OS popup.
-// Native select dropdowns render as a popup outside the settings NSWindow's own
-// frame — when the popup extends above the window's top edge (common, since the
-// panel is docked to screen-edge and the dropdown often has more items than fit
-// below), the cursor moving into that popup is technically outside `frame`, so
-// the hover-poll loop below would see "not hovered" and collapse the window out
-// from under the open popup. While this flag is set, the loop treats the panel
-// as hovered unconditionally so it can't collapse mid-selection.
-static SETTINGS_PANEL_LOCKED: AtomicBool = AtomicBool::new(false);
-
-// Collapsed settings-window dimensions, sized to the cog itself so the
-// hover-to-expand target is the visible icon only — not the full-height column
-// (height) and not a strip of dead space to its right (width). The cog
-// (.panel-handle) is 30px wide, anchored to the window's left edge; the window
-// is pinned flush to the monitor's right edge, so matching the width to the cog
-// puts the icon flush against the screen edge with no floating gap.
-const COLLAPSED_WIDTH: f64 = 30.0;
-const COLLAPSED_HEIGHT: f64 = 30.0;
-
-// ── Wallpaper pause coordination ────────────────────────────────────────────
-// The wallpaper render is paused (render loop suspended in the theme iframe)
-// when ANY of these are true. Each input sets its own flag, then calls
-// recompute_wallpaper_visibility, which emits the single "occlusion-change"
-// event (payload = is_visible) the frontend already consumes. Keeping them
-// separate means a fullscreen game ending doesn't un-pause a manual pause, etc.
-static MANUAL_PAUSE: AtomicBool = AtomicBool::new(false); // tray "Pause Wallpaper"
-static FULLSCREEN_ACTIVE: AtomicBool = AtomicBool::new(false); // Windows fullscreen app
-static WINDOW_OCCLUDED: AtomicBool = AtomicBool::new(false); // desktop hidden behind other windows
-static ON_BATTERY: AtomicBool = AtomicBool::new(false); // unplugged, and the user asked us to pause
-/// Whether "pause on battery" is switched on. Off by default: a wallpaper that
-/// vanishes the moment the charger comes out looks like a crash, so this is
-/// something the user opts into rather than discovers.
-static BATTERY_SAVER_ENABLED: AtomicBool = AtomicBool::new(false);
-
-/// Emit the combined visibility state to the frontend. Visible only when nothing
-/// wants the wallpaper paused.
-fn recompute_wallpaper_visibility(app: &tauri::AppHandle) {
-    let paused = MANUAL_PAUSE.load(Ordering::Relaxed)
-        || FULLSCREEN_ACTIVE.load(Ordering::Relaxed)
-        || WINDOW_OCCLUDED.load(Ordering::Relaxed)
-        || (BATTERY_SAVER_ENABLED.load(Ordering::Relaxed) && ON_BATTERY.load(Ordering::Relaxed));
-    let _ = app.emit("occlusion-change", !paused);
-}
 
 /// Turn "pause on battery" on or off from the settings panel. Recomputes
 /// immediately so switching it on while already unplugged pauses now, rather
@@ -115,11 +72,6 @@ fn get_wallpaper_paused() -> bool {
     MANUAL_PAUSE.load(Ordering::Relaxed)
         || FULLSCREEN_ACTIVE.load(Ordering::Relaxed)
         || WINDOW_OCCLUDED.load(Ordering::Relaxed)
-}
-
-#[tauri::command]
-fn get_hardware_id() -> Result<String, String> {
-    machine_uid::get().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -738,36 +690,6 @@ fn sanitize_dir_name(input: &str) -> String {
     }
 }
 
-fn mime_for(path: &std::path::Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "html" | "htm" => "text/html",
-        "js" | "mjs" => "text/javascript",
-        "css" => "text/css",
-        "json" => "application/json",
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "ico" => "image/x-icon",
-        "webm" => "video/webm",
-        "mp4" => "video/mp4",
-        "wasm" => "application/wasm",
-        "ttf" => "font/ttf",
-        "otf" => "font/otf",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        // GLSL shaders and anything unknown: plain text is fine for fetch()
-        _ => "text/plain",
-    }
-}
-
 /// Serve `theme://localhost/<absolute-fs-path>` (each segment percent-encoded).
 /// Only paths under the AppData themes dir or the local dev wallpapers dir are allowed.
 ///
@@ -928,7 +850,7 @@ fn provision_default_theme(app: &tauri::AppHandle) {
 /// GUI-subsystem app with NO console, so println! is invisible in the field —
 /// this file is the only way to see what actually happened on a user's machine.
 /// Best-effort: never panics, silently no-ops if the path is unavailable.
-fn dlog(app: &tauri::AppHandle, msg: &str) {
+pub(crate) fn dlog(app: &tauri::AppHandle, msg: &str) {
     use std::io::Write;
     println!("{}", msg);
     if let Ok(dir) = app.path().app_data_dir() {
@@ -944,89 +866,6 @@ fn dlog(app: &tauri::AppHandle, msg: &str) {
                 .unwrap_or(0);
             let _ = writeln!(f, "[{}] {}", ts, msg);
         }
-    }
-}
-
-fn handle_theme_protocol(
-    app: &tauri::AppHandle,
-    request: &tauri::http::Request<Vec<u8>>,
-) -> tauri::http::Response<Vec<u8>> {
-    let deny = |status: u16| {
-        tauri::http::Response::builder()
-            .status(status)
-            .header("Access-Control-Allow-Origin", "*")
-            .body(Vec::new())
-            .unwrap()
-    };
-
-    let decoded = match urlencoding::decode(request.uri().path()) {
-        Ok(s) => s.into_owned(),
-        Err(_) => return deny(400),
-    };
-
-    // Windows custom-scheme URLs arrive with the path as "/C:/Users/..." — a
-    // leading slash BEFORE the drive letter that PathBuf/canonicalize can't
-    // resolve, so every manifest/asset fetch 404s and the dropdown ends up empty.
-    // Strip that leading slash when it precedes a "<drive>:" prefix.
-    #[cfg(target_os = "windows")]
-    let decoded = {
-        let b = decoded.as_bytes();
-        if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
-            decoded[1..].to_string()
-        } else {
-            decoded
-        }
-    };
-
-    let fs_path = std::path::PathBuf::from(&decoded);
-
-    // Canonicalize to defeat ../ traversal; 404 if the file doesn't exist.
-    let canon = match fs_path.canonicalize() {
-        Ok(p) => p,
-        Err(e) => {
-            dlog(app, &format!("[theme://] 404 canonicalize FAILED path={:?} err={}", decoded, e));
-            return deny(404);
-        }
-    };
-
-    // Allowlist roots: installed themes + local dev wallpaper source tree.
-    let themes_root = app
-        .path()
-        .app_data_dir()
-        .ok()
-        .map(|d| d.join("themes"))
-        .and_then(|d| d.canonicalize().ok());
-    // Local wallpaper source tree — only allowed in dev builds so a personal
-    // path is never baked into shipped release binaries.
-    #[cfg(debug_assertions)]
-    let dev_root = std::path::PathBuf::from("/Users/tdaeche/Novaframe-Wallpapers")
-        .canonicalize()
-        .ok();
-    #[cfg(not(debug_assertions))]
-    let dev_root: Option<std::path::PathBuf> = None;
-
-    let allowed = [themes_root, dev_root]
-        .iter()
-        .flatten()
-        .any(|root| canon.starts_with(root));
-    if !allowed {
-        dlog(app, &format!("[theme://] 403 DENIED (outside allowed roots): {:?}", canon));
-        return deny(403);
-    }
-
-    match std::fs::read(&canon) {
-        Ok(bytes) => {
-            dlog(app, &format!("[theme://] 200 served {} bytes: {:?}", bytes.len(), canon));
-            tauri::http::Response::builder()
-                .status(200)
-                .header("Content-Type", mime_for(&canon))
-                // Required: the main window (tauri://localhost origin) fetches manifests
-                // cross-origin from theme://localhost.
-                .header("Access-Control-Allow-Origin", "*")
-                .body(bytes)
-                .unwrap()
-        }
-        Err(_) => deny(404),
     }
 }
 
@@ -1550,7 +1389,7 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .register_uri_scheme_protocol("theme", |ctx, request| {
-            handle_theme_protocol(&ctx.app_handle().clone(), &request)
+            theme_protocol::handle_theme_protocol(&ctx.app_handle().clone(), &request)
         })
         .setup(|app| {
             let handle = app.handle().clone();
@@ -1984,7 +1823,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, handle_engine_apply, check_theme_updates_rust, get_themes_dir, get_hardware_id, set_autostart, get_autostart, get_wallpaper_paused, delete_theme, set_battery_saver, flush_pending_deeplink])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, handle_engine_apply, check_theme_updates_rust, get_themes_dir, system::get_hardware_id, set_autostart, get_autostart, get_wallpaper_paused, delete_theme, set_battery_saver, flush_pending_deeplink])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }
