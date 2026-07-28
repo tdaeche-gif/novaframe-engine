@@ -1890,41 +1890,47 @@ fn main() {
                     std::thread::spawn(move || {
                         let mut was_hovered = false;
                         loop {
-                            std::thread::sleep(std::time::Duration::from_millis(150));
+                            let mut sleep_ms = 800u64;
 
                             if SETTINGS_PANEL_LOCKED.load(Ordering::Relaxed) {
                                 if !was_hovered {
                                     was_hovered = true;
                                     expand_settings_panel(settings_clone.clone());
                                 }
+                                std::thread::sleep(std::time::Duration::from_millis(150));
                                 continue;
                             }
 
                             if let Ok(ns_window_ptr) = settings_clone.ns_window() {
-                                if ns_window_ptr.is_null() {
-                                    continue;
-                                }
-                                unsafe {
-                                    let ns_window = ns_window_ptr as *mut objc2::runtime::AnyObject;
-                                    let ns_event_class = objc2::class!(NSEvent);
-                                    let mouse_loc: NSPoint = objc2::msg_send![ns_event_class, mouseLocation];
-                                    let frame: NSRect = objc2::msg_send![ns_window, frame];
+                                if !ns_window_ptr.is_null() {
+                                    unsafe {
+                                        let ns_window = ns_window_ptr as *mut objc2::runtime::AnyObject;
+                                        let ns_event_class = objc2::class!(NSEvent);
+                                        let mouse_loc: NSPoint = objc2::msg_send![ns_event_class, mouseLocation];
+                                        let frame: NSRect = objc2::msg_send![ns_window, frame];
 
-                                    let is_hovered = mouse_loc.x >= frame.origin.x &&
-                                                     mouse_loc.x <= frame.origin.x + frame.size.width &&
-                                                     mouse_loc.y >= frame.origin.y &&
-                                                     mouse_loc.y <= frame.origin.y + frame.size.height;
+                                        let is_near = mouse_loc.x >= (frame.origin.x - 50.0);
+                                        if is_near {
+                                            sleep_ms = 100;
+                                        }
 
-                                    if is_hovered != was_hovered {
-                                        was_hovered = is_hovered;
-                                        if is_hovered {
-                                            expand_settings_panel(settings_clone.clone());
-                                        } else {
-                                            collapse_settings_panel(settings_clone.clone());
+                                        let is_hovered = mouse_loc.x >= frame.origin.x &&
+                                                         mouse_loc.x <= frame.origin.x + frame.size.width &&
+                                                         mouse_loc.y >= frame.origin.y &&
+                                                         mouse_loc.y <= frame.origin.y + frame.size.height;
+
+                                        if is_hovered != was_hovered {
+                                            was_hovered = is_hovered;
+                                            if is_hovered {
+                                                expand_settings_panel(settings_clone.clone());
+                                            } else {
+                                                collapse_settings_panel(settings_clone.clone());
+                                            }
                                         }
                                     }
                                 }
                             }
+                            std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
                         }
                     });
                 }

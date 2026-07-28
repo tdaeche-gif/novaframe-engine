@@ -131,17 +131,30 @@ import {
 } from './modules/themeManager.js';
 
 // ── Mouse passthrough to iframe (for interactive themes like Ignis) ────────
+let mousePending = false;
+let lastX = NaN, lastY = NaN;
 window.addEventListener('mousemove', (e) => {
-    const iframe = ThemeManager?.currentIframe;
-    if (!iframe?.contentWindow) return;
-    try {
-        iframe.contentWindow.postMessage({
-            type: 'novaframe-pointer',
-            x: e.clientX, y: e.clientY,
-            nx: e.clientX / window.innerWidth,
-            ny: e.clientY / window.innerHeight
-        }, '*');
-    } catch (_) {}
+    if (mousePending) return;
+    if (lastX === e.clientX && lastY === e.clientY) return;
+    const dx = Math.abs(e.clientX - lastX), dy = Math.abs(e.clientY - lastY);
+    if (!isNaN(dx) && dx < 1.5 && dy < 1.5) return;
+    lastX = e.clientX;
+    lastY = e.clientY;
+
+    mousePending = true;
+    requestAnimationFrame(() => {
+        mousePending = false;
+        const iframe = ThemeManager?.currentIframe;
+        if (!iframe || iframe.style.display === 'none' || !iframe.contentWindow) return;
+        try {
+            iframe.contentWindow.postMessage({
+                type: 'novaframe-pointer',
+                x: e.clientX, y: e.clientY,
+                nx: e.clientX / window.innerWidth,
+                ny: e.clientY / window.innerHeight
+            }, '*');
+        } catch (_) {}
+    });
 });
 
 
@@ -188,31 +201,6 @@ const ConfigManager = {
             }
             
             config = setConfig((await this.store.get('novaframe_config')) || DEFAULT_CONFIG);
-
-            // Only the main window needs to poll the store for cross-window
-            // config/theme changes. The settings window wrote the change — it
-            // already knows. Both windows polling causes the theme to flicker as
-            // each poll detects "changed" and triggers another loadTheme.
-            const isMainWindow = window.location.search.includes('mode=main');
-            if (isMainWindow) {
-                setInterval(async () => {
-                    const latestConfig = await this.store.get('novaframe_config');
-                    if (latestConfig) {
-                        config = setConfig(latestConfig);
-                        relayThemeSettingsToIframe();
-                    }
-
-                    const latestTheme = await this.store.get('activeTheme');
-                    const normLatest = latestTheme || null;
-                    const normCurrent = ThemeManager.currentThemePath || null;
-                    if (normLatest !== normCurrent) {
-                        // Don't pre-set currentThemePath here — loadTheme's
-                        // idempotency guard would then skip the actual render.
-                        ThemeManager.loadTheme(normLatest);
-                    }
-                }, 1000);
-            }
-
         } catch (e) {
             console.error("[ConfigManager] Native store failed:", e);
             config = setConfig(JSON.parse(localStorage.getItem('novaframe_config')) || DEFAULT_CONFIG);
@@ -1100,17 +1088,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     listen('occlusion-change', (event) => {
         const isVisible = event.payload;
-        // Cache it so a theme mounted later can be told without a round
-        // trip, and so the sleep failsafe can skip pointless reloads.
         setLastKnownOcclusion(!isVisible);
-        // Broadcast to external themes so they can pause their render loops
-        if (ThemeManager.currentIframe?.contentWindow) {
-            try {
-                ThemeManager.currentIframe.contentWindow.postMessage({
-                    type: 'novaframe-occlusion',
-                    occluded: !isVisible
-                }, '*');
-            } catch (_) {}
+        if (ThemeManager.currentIframe) {
+            ThemeManager.currentIframe.style.display = isVisible ? 'block' : 'none';
+            if (ThemeManager.currentIframe.contentWindow) {
+                try {
+                    ThemeManager.currentIframe.contentWindow.postMessage({
+                        type: 'novaframe-occlusion',
+                        occluded: !isVisible
+                    }, '*');
+                } catch (_) {}
+            }
         }
     });
 });

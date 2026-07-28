@@ -46,9 +46,12 @@ export async function pushCurrentOcclusion(iframe) {
         console.warn('[Novaframe] get_wallpaper_paused unavailable, using cached state', e);
     }
     _lastKnownOccluded = occluded;
-    try {
-        iframe?.contentWindow?.postMessage({ type: 'novaframe-occlusion', occluded }, '*');
-    } catch (_) {}
+    if (iframe) {
+        iframe.style.display = occluded ? 'none' : 'block';
+        try {
+            iframe.contentWindow?.postMessage({ type: 'novaframe-occlusion', occluded }, '*');
+        } catch (_) {}
+    }
 }
 
 export function relayThemeSettingsToIframe(currentThemePath = ThemeManager.currentThemePath, currentIframe = ThemeManager.currentIframe, configPassed = null) {
@@ -219,9 +222,16 @@ export const ThemeManager = {
             }
         });
 
-        const resizeObserver = new ResizeObserver(() => postViewport('novaframe-theme-resize'));
+        let resizeDebounce = null;
+        const resizeObserver = new ResizeObserver(() => {
+            if (resizeDebounce) clearTimeout(resizeDebounce);
+            resizeDebounce = setTimeout(() => postViewport('novaframe-theme-resize'), 150);
+        });
         resizeObserver.observe(iframe);
-        iframe._novaframeResizeCleanup = () => resizeObserver.disconnect();
+        iframe._novaframeResizeCleanup = () => {
+            if (resizeDebounce) clearTimeout(resizeDebounce);
+            resizeObserver.disconnect();
+        };
 
         container.appendChild(iframe);
         this.currentIframe = iframe;
