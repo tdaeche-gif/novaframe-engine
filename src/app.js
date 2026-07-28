@@ -748,6 +748,7 @@ async function scanThemes() {
                 return null;
             }
         }));
+        const fragment = document.createDocumentFragment();
         for (const t of scanned) {
             if (!t) continue;
             const { themePath, label, mode, render_mode, custom_settings, theme_id, version } = t;
@@ -757,8 +758,9 @@ async function scanThemes() {
             option.value = themePath;
             option.dataset.renderMode = mode;
             option.textContent = label;
-            selector.appendChild(option);
+            fragment.appendChild(option);
         }
+        selector.appendChild(fragment);
 
         const activeTheme = await ConfigManager.getTheme();
         console.log("[Novaframe] Active theme from config:", activeTheme);
@@ -1077,27 +1079,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
-    let lastTick = Date.now();
-    const SLEEP_GAP_MS = 20000;
-    if (isMainWindow()) setInterval(() => {
-
-        const now = Date.now();
-        const gap = now - lastTick;
-        if (gap > SLEEP_GAP_MS) {
-            if (getLastKnownOcclusion()) {
-                console.log(`[Novaframe] timer gap ${gap}ms while paused — skipping iframe reload`);
-            } else if (ThemeManager.currentIframe) {
-                console.log(`[Novaframe] timer gap ${gap}ms — reloading iframe to restore WebGL context`);
-                // Force a hard reload of the iframe to obliterate the dead WebGL context
-                const currentSrc = ThemeManager.currentIframe.src;
-                ThemeManager.currentIframe.src = 'about:blank';
-                setTimeout(() => {
-                    ThemeManager.currentIframe.src = currentSrc;
-                }, 50);
+    if (isMainWindow()) {
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && !getLastKnownOcclusion() && ThemeManager.currentIframe) {
+                console.log('[Novaframe] System wake/visibility restored — verifying iframe state');
             }
-        }
-        lastTick = now;
-    }, 1000);
+        });
+    }
 
     listen('occlusion-change', (event) => {
         const isVisible = event.payload;

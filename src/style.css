@@ -126,28 +126,16 @@ html[data-mode="settings"] #welcomeOverlay { display: none !important; }
     height: 100%;
     padding: 12px 16px;
     box-sizing: border-box;
-    /* Thin unobtrusive scrollbar: the Windows default is wide enough to eat
-       the right padding and leave the buttons flush with the screen edge. */
     scrollbar-width: thin;
     scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
     background: rgba(10, 15, 26, 0.78);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
-    /* Straight left wall (no left border/radius) so the cog tab abuts it
-       seamlessly — no notch, no double line between tab and panel. */
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-left: none;
     border-radius: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    /* Reserve the scrollbar gutter unconditionally. WebView2 (Windows) uses
-       classic scrollbars that only reserve their track width while content
-       actually overflows, so short-content themes reflow ~6-8px further
-       right than tall ones — the padding is symmetric in code but the
-       available content width isn't. macOS WKWebView uses overlay
-       scrollbars (zero width, nothing to reserve), which is why this only
-       ever showed up on Windows. Reserving it always keeps content width
-       constant regardless of overflow state. */
     scrollbar-gutter: stable;
     display: flex;
     flex-direction: column;
@@ -155,6 +143,8 @@ html[data-mode="settings"] #welcomeOverlay { display: none !important; }
     pointer-events: auto;
     opacity: 1;
     transition: opacity 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+    will-change: opacity;
+    contain: layout style;
 }
 
 /* Strict horizontal boundary: no child may exceed the panel width, and any
