@@ -231,19 +231,33 @@ pub async fn download_and_install_theme(
         }
     }
 
-    let mut target_dir = staging_dir.clone();
-    let entries: Vec<_> = fs::read_dir(&staging_dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(|e| e.ok())
-        .collect();
+    let find_manifest_dir = |start: &std::path::Path| -> Option<std::path::PathBuf> {
+        if start.join("manifest.json").exists() || start.join("engine_manifest.json").exists() {
+            return Some(start.to_path_buf());
+        }
+        if let Ok(read_dir) = fs::read_dir(start) {
+            for entry in read_dir.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy();
+                    if !name.starts_with('.') && !name.starts_with("__MACOSX") {
+                        if p.join("manifest.json").exists() || p.join("engine_manifest.json").exists() {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
 
-    if entries.len() == 1 && entries[0].path().is_dir() {
-        target_dir = entries[0].path();
-    }
+    let target_dir = match find_manifest_dir(&staging_dir) {
+        Some(dir) => dir,
+        None => return Err("Downloaded archive missing manifest.json".into()),
+    };
 
-    let manifest_path = target_dir.join("manifest.json");
-    if !manifest_path.exists() {
-        return Err("Downloaded archive missing manifest.json".into());
+    if !target_dir.join("manifest.json").exists() && target_dir.join("engine_manifest.json").exists() {
+        let _ = fs::copy(target_dir.join("engine_manifest.json"), target_dir.join("manifest.json"));
     }
 
     let mut folder_slug = wallpaper_title

@@ -8,6 +8,7 @@ import {
 } from './constants.js';
 import { getConfig } from './state.js';
 import { isMainWindow } from './windowEnv.js';
+import { enableMouseRelay, disableMouseRelay } from './mouseRelay.js';
 
 let _lastKnownOccluded = false;
 let _lastRelayedSettings = null;
@@ -235,9 +236,11 @@ export const ThemeManager = {
 
         container.appendChild(iframe);
         this.currentIframe = iframe;
+        enableMouseRelay(() => ThemeManager.currentIframe);
     },
 
     unmountIframe() {
+        disableMouseRelay();
         if (this.currentIframe) {
             try { this.currentIframe._novaframeResizeCleanup?.(); } catch (_) {}
             if (this.currentIframe.parentNode) {

@@ -100,27 +100,6 @@ function initDualWindowSystem() {
 // Each theme lives on disk as: <themesDir>/<theme_id>/ + engine_manifest.json
 // The manifest tells us what the entry file is and which render mode to use.
 
-const LEGACY_THEME_DEFAULTS = {
-    mapImageSrc: 'assets/world-map-mercator.jpg',
-    bgColor: '#0f141d',
-    timelineHeight: 40,
-    timelineBgColor: 'rgba(0, 5, 20, 0.78)',
-    timelineTickColor: 'rgba(160, 180, 255, 0.45)',
-    timelineTextColor: '#e0e8ff',
-    shadowColorHex: '0, 8, 24',
-    sunMarkerColor: '#ffd700',
-    sunGlowColor: '#ffaa00',
-    gridColor: 'rgba(255, 255, 255, 0.06)',
-    equatorColor: 'rgba(255, 215, 0, 0.25)',
-    pinColor: '#00a2ff',
-    pinGlowColor: 'rgba(0, 162, 255, 0.5)',
-    pinTextColor: 'rgba(224, 232, 255, 0.75)',
-    shadow_color: '#000000',
-    shadow_opacity: 0.5,
-    show_analemma: true,
-    use_gpu_shader: true
-};
-
 import {
     ThemeManager,
     applyThemeScope,
@@ -129,33 +108,8 @@ import {
     getLastKnownOcclusion,
     setLastKnownOcclusion
 } from './modules/themeManager.js';
+import { LEGACY_THEME_DEFAULTS, calculateSolarPosition, drawNightShadow, drawSunMarker } from './modules/legacyRenderer.js';
 
-// ── Mouse passthrough to iframe (for interactive themes like Ignis) ────────
-let mousePending = false;
-let lastX = NaN, lastY = NaN;
-window.addEventListener('mousemove', (e) => {
-    if (mousePending) return;
-    if (lastX === e.clientX && lastY === e.clientY) return;
-    const dx = Math.abs(e.clientX - lastX), dy = Math.abs(e.clientY - lastY);
-    if (!isNaN(dx) && dx < 1.5 && dy < 1.5) return;
-    lastX = e.clientX;
-    lastY = e.clientY;
-
-    mousePending = true;
-    requestAnimationFrame(() => {
-        mousePending = false;
-        const iframe = ThemeManager?.currentIframe;
-        if (!iframe || iframe.style.display === 'none' || !iframe.contentWindow) return;
-        try {
-            iframe.contentWindow.postMessage({
-                type: 'novaframe-pointer',
-                x: e.clientX, y: e.clientY,
-                nx: e.clientX / window.innerWidth,
-                ny: e.clientY / window.innerHeight
-            }, '*');
-        } catch (_) {}
-    });
-});
 
 
 // ── Constants & Configuration ──────────────────────────────────────────────
