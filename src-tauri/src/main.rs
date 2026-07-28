@@ -255,17 +255,37 @@ fn chrome_always_hidden() -> bool {
 /// is checked first and returns false for them to avoid pausing forever.
 #[cfg(target_os = "macos")]
 fn is_fullscreen_app_active() -> bool {
-    // Guard: if the user permanently hides both chrome elements, visibleFrame
-    // always equals frame and the test below is a false positive forever.
-    if chrome_always_hidden() {
-        return false;
-    }
-
-    // Use raw msg_send! to avoid requiring the NSScreen typed-wrapper feature
-    // in Cargo.toml — this matches the pattern used elsewhere in this file.
     unsafe {
+        let workspace_class = objc2::class!(NSWorkspace);
+        let shared_workspace: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![workspace_class, sharedWorkspace];
+        if !shared_workspace.is_null() {
+            let front_app: *mut objc2::runtime::AnyObject =
+                objc2::msg_send![shared_workspace, frontmostApplication];
+            if !front_app.is_null() {
+                let pid: i32 = objc2::msg_send![front_app, processIdentifier];
+                if pid == std::process::id() as i32 {
+                    return false;
+                }
+                let bundle_id_ptr: *mut objc2::runtime::AnyObject =
+                    objc2::msg_send![front_app, bundleIdentifier];
+                if !bundle_id_ptr.is_null() {
+                    let utf8_ptr: *const std::ffi::c_char = objc2::msg_send![bundle_id_ptr, UTF8String];
+                    if !utf8_ptr.is_null() {
+                        let id_str = std::ffi::CStr::from_ptr(utf8_ptr).to_string_lossy();
+                        if id_str == "com.apple.finder" || id_str.contains("novaframe") {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+
+        if chrome_always_hidden() {
+            return false;
+        }
+
         let ns_screen_class = objc2::class!(NSScreen);
-        // +mainScreen can return nil if there is no screen (rare: headless CI).
         let main_screen: *mut objc2::runtime::AnyObject =
             objc2::msg_send![ns_screen_class, mainScreen];
         if main_screen.is_null() {
@@ -275,8 +295,6 @@ fn is_fullscreen_app_active() -> bool {
         let frame: objc2_foundation::NSRect = objc2::msg_send![main_screen, frame];
         let visible: objc2_foundation::NSRect = objc2::msg_send![main_screen, visibleFrame];
 
-        // Tolerance, not equality: visibleFrame can differ by a fraction of a
-        // point due to rounding on scaled (Retina) displays.
         (frame.size.height - visible.size.height).abs() < 1.0
             && (frame.size.width - visible.size.width).abs() < 1.0
     }

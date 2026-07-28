@@ -55,6 +55,7 @@ pub fn get_wallpaper_paused() -> bool {
     MANUAL_PAUSE.load(Ordering::Relaxed)
         || FULLSCREEN_ACTIVE.load(Ordering::Relaxed)
         || WINDOW_OCCLUDED.load(Ordering::Relaxed)
+        || (BATTERY_SAVER_ENABLED.load(Ordering::Relaxed) && ON_BATTERY.load(Ordering::Relaxed))
 }
 
 /// Spawn the background battery source polling thread (polls every 60 seconds).
