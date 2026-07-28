@@ -15,8 +15,8 @@
     <script>
         const scene = new THREE.Scene();
         const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-        const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "low-power", preserveDrawingBuffer: true });
-        renderer.setPixelRatio(1);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: true });
+        renderer.setPixelRatio(window.devicePixelRatio || 1);
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.body.appendChild(renderer.domElement);
         renderer.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault(); if (window.wp) window.wp.pause(); }, false);
@@ -25,8 +25,8 @@
         const uniforms = {
             u_time: { value: 0.0 },
             u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-            u_color_a: { value: new THREE.Color("#0f1428") },
-            u_color_b: { value: new THREE.Color("#e15b88") },
+            u_color_a: { value: new THREE.Color("#1a1e3c") },
+            u_color_b: { value: new THREE.Color("#c96f8e") },
             u_speed: { value: 0.26 },
             u_grain: { value: 0.3 }
         };
@@ -42,17 +42,16 @@
             void main(){
                 float aspect=u_resolution.x/u_resolution.y;
                 vec2 p=(vUv-0.5)*vec2(aspect,1.0);
-                // breathing pulse: center swells and recedes across viewport
-                float t=u_time*u_speed*0.18;
+                // breathing pulse: center swells and recedes (speed multiplier 0.15)
+                float t=u_time*u_speed*0.15;
                 float breath=0.5+0.5*sin(t*6.28318);
-                // focal point Lissajous drift
+                // lissajous focal point drift
                 vec2 focus=vec2(sin(t*2.1)*0.25, cos(t*1.4)*0.2);
                 float d=length(p-focus);
-                float g=smoothstep(0.08+breath*0.48, 1.05-breath*0.2, d);
+                float g=smoothstep(0.10+breath*0.40, 1.15-breath*0.20, d);
                 vec3 col=mix(u_color_b,u_color_a,clamp(g,0.0,1.0));
-                // hue shimmer: color B leans slightly warmer/cooler across cycle
-                col+=vec3(0.03,-0.015,0.02)*sin(t*4.0)*(1.0-g);
-                // gentle top-to-bottom deepening
+                // subtle color shimmer
+                col+=vec3(0.025,-0.012,0.018)*sin(t*4.0)*(1.0-g);
                 col*=0.9+0.1*vUv.y;
                 // film grain
                 col+=(hash(vUv*u_resolution.xy+fract(u_time)*7.0)-0.5)*0.06*u_grain;
@@ -71,17 +70,39 @@
         }
         const clock = new THREE.Clock();
         window.wp = NovaframeWallpaper.createWallpaper({
-            fps: 30, pauseWhenHidden: true,
+            fps: 60, pauseWhenHidden: true,
             onResize: ({width,height}) => { renderer.setSize(width,height); uniforms.u_resolution.value.set(width,height); },
             onFrame: () => { uniforms.u_time.value = clock.getElapsedTime(); renderer.render(scene,camera); },
             onSettings: applySettings,
         });
         window.wp.start();
+
+        // Keyboard hotkeys for instant high-quality capture
         document.addEventListener('keydown', (e) => {
-            if (e.key.toLowerCase() === 'p') { renderer.render(scene,camera); const l=document.createElement('a'); l.download='preview.jpg'; l.href=renderer.domElement.toDataURL('image/jpeg',0.9); l.click(); }
-            if (e.key.toLowerCase() === 'r') { const st=renderer.domElement.captureStream(30); const mr=new MediaRecorder(st,{mimeType:'video/webm'}); const ch=[]; mr.ondataavailable=e=>ch.push(e.data); mr.onstop=()=>{const b=new Blob(ch,{type:'video/webm'});const l=document.createElement('a');l.download='preview.webm';l.href=URL.createObjectURL(b);l.click();}; mr.start(); setTimeout(()=>mr.stop(),5000); }
+            if (e.key.toLowerCase() === 'p') {
+                renderer.render(scene,camera);
+                const l=document.createElement('a');
+                l.download='preview.jpg';
+                l.href=renderer.domElement.toDataURL('image/jpeg',0.95);
+                l.click();
+            }
+            if (e.key.toLowerCase() === 'r') {
+                const st=renderer.domElement.captureStream(60);
+                const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm';
+                const mr=new MediaRecorder(st,{mimeType, videoBitsPerSecond: 5000000});
+                const ch=[];
+                mr.ondataavailable=e=>ch.push(e.data);
+                mr.onstop=()=>{
+                    const b=new Blob(ch,{type:'video/webm'});
+                    const l=document.createElement('a');
+                    l.download='preview.webm';
+                    l.href=URL.createObjectURL(b);
+                    l.click();
+                };
+                mr.start(1000);
+                setTimeout(()=>mr.stop(),10000);
+            }
         });
-        window.parent.postMessage({ type: 'novaframe-ready' }, '*');
     </script>
 </body>
 </html>
