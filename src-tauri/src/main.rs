@@ -9,6 +9,11 @@ use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
 use objc2_foundation::{NSPoint, NSRect};
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
+
+static LAST_DEEPLINK_SEEN: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+static PENDING_DEEPLINK_TOKEN: Mutex<Option<String>> = Mutex::new(None);
 
 // Set while a native control (e.g. the theme <select>) has an open OS popup.
 // Native select dropdowns render as a popup outside the settings NSWindow's own
@@ -1450,6 +1455,20 @@ fn decode_deeplink_token(raw_token: &str) -> Option<String> {
         .map(|s| s.into_owned())
 }
 
+#[tauri::command]
+fn flush_pending_deeplink(app: tauri::AppHandle) {
+    if let Ok(mut guard) = PENDING_DEEPLINK_TOKEN.lock() {
+        if let Some(token_str) = guard.take() {
+            dlog(&app, &format!("[deeplink] flushing pending token_len={}", token_str.len()));
+            if let Some(w) = app.get_webview_window("settings") {
+                let _ = w.emit("engine-apply-theme", token_str);
+            } else {
+                let _ = app.emit("engine-apply-theme", token_str);
+            }
+        }
+    }
+}
+
 fn process_deeplink_url(app: &tauri::AppHandle, url_str: &str) {
     dlog(app, &format!("[deeplink] received: {}", url_str));
     if url_str.starts_with("novaframe://apply") {
@@ -1466,14 +1485,28 @@ fn process_deeplink_url(app: &tauri::AppHandle, url_str: &str) {
             let decoded_res = raw_token.and_then(decode_deeplink_token);
             match decoded_res {
                 Some(token_str) => {
-                    dlog(app, &format!("[deeplink] emitting engine-apply-theme token_len={}", token_str.len()));
-                    let target_win = app.get_webview_window("settings");
-                    let res = match target_win {
-                        Some(w) => w.emit("engine-apply-theme", token_str),
-                        None => app.emit("engine-apply-theme", token_str),
-                    };
-                    if let Err(e) = res {
-                        dlog(app, &format!("[deeplink] emit engine-apply-theme error: {}", e));
+                    let now = Instant::now();
+                    if let Ok(mut guard) = LAST_DEEPLINK_SEEN.lock() {
+                        if let Some((ref last_token, last_time)) = *guard {
+                            if last_token == &token_str && now.duration_since(last_time).as_millis() < 1500 {
+                                dlog(app, "[deeplink] deduplicated duplicate trigger within 1.5s window");
+                                return;
+                            }
+                        }
+                        *guard = Some((token_str.clone(), now));
+                    }
+
+                    if let Some(target_win) = app.get_webview_window("settings") {
+                        dlog(app, &format!("[deeplink] emitting engine-apply-theme token_len={}", token_str.len()));
+                        if let Err(e) = target_win.emit("engine-apply-theme", token_str) {
+                            dlog(app, &format!("[deeplink] emit engine-apply-theme error: {}", e));
+                        }
+                    } else {
+                        dlog(app, &format!("[deeplink] settings window missing, buffering pending token_len={}", token_str.len()));
+                        if let Ok(mut pending_guard) = PENDING_DEEPLINK_TOKEN.lock() {
+                            *pending_guard = Some(token_str.clone());
+                        }
+                        let _ = app.emit("engine-apply-theme", token_str);
                     }
                 }
                 None => {
@@ -1945,7 +1978,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, handle_engine_apply, check_theme_updates_rust, get_themes_dir, get_hardware_id, set_autostart, get_autostart, get_wallpaper_paused, delete_theme, set_battery_saver])
+        .invoke_handler(tauri::generate_handler![expand_settings_panel, collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, open_storefront_window, download_and_install_theme, handle_engine_apply, check_theme_updates_rust, get_themes_dir, get_hardware_id, set_autostart, get_autostart, get_wallpaper_paused, delete_theme, set_battery_saver, flush_pending_deeplink])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }

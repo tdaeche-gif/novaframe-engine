@@ -967,6 +967,8 @@ function registerEngineApplyListener() {
             _applyGate = false;
         }
     });
+
+    invoke('flush_pending_deeplink').catch(() => {});
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
