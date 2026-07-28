@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Novaframe",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "identifier": "com.novaframe.desktop.wallpaper",
   "build": {
     "frontendDist": "../src",
@@ -62,7 +62,7 @@
       "endpoints": [
         "https://api.novaframe.co.uk/api/engine/updates/{{target}}/{{current_version}}"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFENDYwQkFCOEU0OUJDNkYKUldSdnZFbU9xd3RHSFdickRaNlJKU2U0WUg0UVpGay9VR3pSbWxHMlRFRko2akJkK2pSMncveEoK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUzOUMyNEM1MTUwRjU5OUUKVWxkVG5DVEZGUTlabm1PcDgxUXN0WGdNd0dKcUpGZXdEVjFuSlVDYlVZZWtsNmMwSHJpdTBTYUoK"
     }
   },
   "bundle": {
