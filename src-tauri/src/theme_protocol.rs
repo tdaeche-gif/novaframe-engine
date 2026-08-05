@@ -31,16 +31,88 @@ pub fn mime_for(path: &std::path::Path) -> &'static str {
     }
 }
 
+/// Origins allowed to read theme assets over `theme://`.
+///
+/// - `tauri://localhost` / `http://tauri.localhost` — the main and settings
+///   windows (the scheme differs between WKWebView and WebView2).
+/// - `theme://localhost` / `http://theme.localhost` — one theme asset fetching
+///   another when the frame is not sandboxed (marketplace preview capture).
+/// - `null` is handled separately: the theme iframe is mounted with
+///   `sandbox="allow-scripts"` and no `allow-same-origin`, so it has an opaque
+///   origin and every `fetch('./shader.frag')` inside it sends `Origin: null`.
+const ALLOWED_ORIGINS: [&str; 4] = [
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "theme://localhost",
+    "http://theme.localhost",
+];
+
+/// Decide the `Access-Control-Allow-Origin` value for a request, or `None` if
+/// the origin is not permitted to read theme content at all.
+///
+/// This used to unconditionally answer `*`. The custom scheme handler is
+/// registered app-wide, so a wildcard let ANY page loaded in ANY of the app's
+/// webviews — including the remote marketplace window — `fetch()` the raw
+/// source of every wallpaper the user has purchased. Those assets are the
+/// product; a wildcard here is a straight exfiltration path around DRM.
+///
+/// A missing Origin header is allowed: plain subresource loads (`<img>`,
+/// `<script>`, stylesheet, iframe navigation) do not send one, and those are
+/// exactly how a theme's own HTML pulls in its files.
+fn allowed_cors_origin(request: &tauri::http::Request<Vec<u8>>) -> Option<String> {
+    let origin = match request.headers().get("Origin").and_then(|v| v.to_str().ok()) {
+        // No Origin header — a non-CORS subresource load. Nothing to reflect.
+        None => return Some("null".to_string()),
+        Some(o) => o,
+    };
+    if origin == "null" {
+        return Some("null".to_string());
+    }
+    if ALLOWED_ORIGINS.contains(&origin) {
+        return Some(origin.to_string());
+    }
+
+    // `tauri dev` serves the frontend from a dev server, so in a debug build the
+    // main and settings windows have an http://localhost:<port> origin rather
+    // than tauri://localhost — without this, every theme asset 403s and the
+    // wallpaper is blank for the entire dev loop. Release builds load from
+    // frontendDist and never take this branch, so the storefront origin stays
+    // denied where it matters.
+    #[cfg(debug_assertions)]
+    if origin.starts_with("http://localhost:") || origin.starts_with("http://127.0.0.1:") {
+        return Some(origin.to_string());
+    }
+
+    None
+}
+
 pub fn handle_theme_protocol(
     app: &tauri::AppHandle,
     request: &tauri::http::Request<Vec<u8>>,
 ) -> tauri::http::Response<Vec<u8>> {
-    let deny = |status: u16| {
+    // Resolved once: every response (including denials) must carry a consistent
+    // ACAO or the webview reports a confusing generic network error instead of
+    // the real status.
+    let cors_origin = allowed_cors_origin(request);
+
+    let deny_origin = cors_origin.clone().unwrap_or_else(|| "null".to_string());
+    let deny = move |status: u16| {
         tauri::http::Response::builder()
             .status(status)
-            .header("Access-Control-Allow-Origin", "*")
+            .header("Access-Control-Allow-Origin", deny_origin.clone())
             .body(Vec::new())
             .unwrap()
+    };
+
+    let Some(cors_origin) = cors_origin else {
+        dlog(
+            app,
+            &format!(
+                "[theme://] 403 DENIED (origin not allowed): {:?}",
+                request.headers().get("Origin")
+            ),
+        );
+        return deny(403);
     };
 
     let decoded = match urlencoding::decode(request.uri().path()) {
@@ -68,6 +140,9 @@ pub fn handle_theme_protocol(
     let canon = match fs_path.canonicalize() {
         Ok(p) => p,
         Err(e) => {
+            // 404s stay logged in release: an empty dropdown in the field is
+            // almost always a path that failed to resolve here, and this line
+            // is the only evidence of it.
             dlog(app, &format!("[theme://] 404 canonicalize FAILED path={:?} err={}", decoded, e));
             return deny(404);
         }
@@ -113,13 +188,18 @@ pub fn handle_theme_protocol(
 
     match std::fs::read(&served_path) {
         Ok(bytes) => {
+            // Debug-only: a theme pulls shaders, textures and manifests over this
+            // handler, and dlog does a file open/write/close per call. Logging
+            // every 200 in release meant a disk write per asset request, forever.
+            #[cfg(debug_assertions)]
             dlog(app, &format!("[theme://] 200 served {} bytes: {:?}", bytes.len(), served_path));
             tauri::http::Response::builder()
                 .status(200)
                 .header("Content-Type", mime_for(&served_path))
                 // Required: the main window (tauri://localhost origin) fetches manifests
-                // cross-origin from theme://localhost.
-                .header("Access-Control-Allow-Origin", "*")
+                // cross-origin from theme://localhost, and the sandboxed theme iframe
+                // fetches its own assets from an opaque ("null") origin.
+                .header("Access-Control-Allow-Origin", cors_origin)
                 .body(bytes)
                 .unwrap()
         }

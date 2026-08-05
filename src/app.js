@@ -5,27 +5,16 @@ console.log("[Novaframe] bundle sentinel: novaframe-app-v0.4.0-settings-fix");
 // must come from these imports. esbuild bundles this into src/app.bundle.js.
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { readDir, remove } from '@tauri-apps/plugin-fs';
 import { Store } from '@tauri-apps/plugin-store';
-import { check as updaterCheck } from '@tauri-apps/plugin-updater';
-import { relaunch, exit as processExit } from '@tauri-apps/plugin-process';
 
 import {
     ENGINE_MANIFEST_VERSION,
-    IS_WINDOWS_WEBVIEW,
-    manifestNeedsNewerEngine,
-    toThemeUrl
+    manifestNeedsNewerEngine
 } from './modules/constants.js';
-import { getMode, isMainWindow, isSettingsWindow } from './modules/windowEnv.js';
+import { isMainWindow, isSettingsWindow } from './modules/windowEnv.js';
 
-import {
-    safeInvoke,
-    getThemesDir,
-    getHardwareId,
-    setIgnoreCursor,
-    reportJsError
-} from './modules/tauriBridge.js';
+import { getThemesDir, setIgnoreCursor } from './modules/tauriBridge.js';
 
 
 
@@ -33,7 +22,7 @@ import {
 // popup open. The popup renders outside the panel window's own frame (often
 // above it, since the panel is docked to the screen edge) — without this, the
 // Rust hover-poll loop sees the cursor leave the window bounds mid-selection
-import { setPanelLocked, POPUP_CONTROLS, initPanelLockDelegation } from './modules/panelLock.js';
+import { setPanelLocked, initPanelLockDelegation } from './modules/panelLock.js';
 
 
 // Check and provision default theme inside system AppData on startup
@@ -92,37 +81,32 @@ function initDualWindowSystem() {
 
 
 // ── Theme Manager ──────────────────────────────────────────────────────────
-// Loads one of three render modes per theme:
-//   - "internal-legacy"  : legacy world-map canvas + sun (default if absent)
-//   - "external-html"    : iframe mounted at full viewport, hides canvases
-//   - "external-canvas"  : (future) iframe that paints its own canvas
+// Every theme renders as an iframe mounted at full viewport:
+//   - "external-html"    : the theme's own index.html drives the render
+//   - "external-canvas"  : same mount, theme paints its own canvas
 //
-// Each theme lives on disk as: <themesDir>/<theme_id>/ + engine_manifest.json
+// The old "internal-legacy" mode (world-map canvas + sun, drawn by the engine
+// itself) was removed along with modules/legacyRenderer.js — loadTheme never
+// dispatched it, so it had been dead for some time while still shipping ~6MB
+// of map imagery in every installer.
+//
+// Each theme lives on disk as: <themesDir>/<theme_id>/ + manifest.json
 // The manifest tells us what the entry file is and which render mode to use.
 
 import {
     ThemeManager,
     applyThemeScope,
-    pushCurrentOcclusion,
     relayThemeSettingsToIframe,
     getLastKnownOcclusion,
     setLastKnownOcclusion
 } from './modules/themeManager.js';
-import { LEGACY_THEME_DEFAULTS, calculateSolarPosition, drawNightShadow, drawSunMarker } from './modules/legacyRenderer.js';
 
 
 
 // ── Constants & Configuration ──────────────────────────────────────────────
 
 // ── State Persistence Configurations (ConfigManager) ───────────────────────
-import {
-    DEFAULT_CONFIG,
-    getConfig,
-    setConfig,
-    patchConfig,
-    getThemeSettings,
-    setThemeSettings
-} from './modules/state.js';
+import { DEFAULT_CONFIG, getConfig, setConfig } from './modules/state.js';
 
 let config = getConfig();
 
@@ -218,49 +202,6 @@ const ConfigManager = {
         }
     }
 };
-
-// ── Cities Database for Autocomplete ────────────────────────────────────────
-const citiesDb = [
-    { name: "London", lat: 51.5074, lon: -0.1278 },
-    { name: "New York", lat: 40.7128, lon: -74.0060 },
-    { name: "Tokyo", lat: 35.6762, lon: 139.6503 },
-    { name: "Paris", lat: 48.8566, lon: 2.3522 },
-    { name: "Sydney", lat: -33.8688, lon: 151.2093 },
-    { name: "Cairo", lat: 30.0444, lon: 31.2357 },
-    { name: "Mumbai", lat: 19.0760, lon: 72.8777 },
-    { name: "São Paulo", lat: -23.5505, lon: -46.6333 },
-    { name: "Los Angeles", lat: 34.0522, lon: -118.2437 },
-    { name: "Chicago", lat: 41.8781, lon: -87.6298 },
-    { name: "Houston", lat: 29.7604, lon: -95.3698 },
-    { name: "Phoenix", lat: 33.4484, lon: -112.0740 },
-    { name: "Philadelphia", lat: 39.9526, lon: -75.1652 },
-    { name: "San Antonio", lat: 29.4241, lon: -98.4936 },
-    { name: "San Diego", lat: 32.7157, lon: -117.1611 },
-    { name: "Dallas", lat: 32.7767, lon: -96.7970 },
-    { name: "San Jose", lat: 37.3382, lon: -121.8863 },
-    { name: "Hong Kong", lat: 22.3193, lon: 114.1694 },
-    { name: "Singapore", lat: 1.3521, lon: 103.8198 },
-    { name: "Berlin", lat: 52.5200, lon: 13.4050 },
-    { name: "Rome", lat: 41.9028, lon: 12.4964 },
-    { name: "Madrid", lat: 40.4168, lon: -3.7038 },
-    { name: "Toronto", lat: 43.6532, lon: -79.3832 },
-    { name: "Mexico City", lat: 19.4326, lon: -99.1332 },
-    { name: "Buenos Aires", lat: -34.6037, lon: -58.3816 },
-    { name: "Cape Town", lat: -33.9249, lon: 18.4241 },
-    { name: "Johannesburg", lat: -26.2041, lon: 28.0473 },
-    { name: "Nairobi", lat: -1.2921, lon: 36.8219 },
-    { name: "Dubai", lat: 25.2048, lon: 55.2708 },
-    { name: "Moscow", lat: 55.7558, lon: 37.6173 },
-    { name: "Beijing", lat: 39.9042, lon: 116.4074 },
-    { name: "Seoul", lat: 37.5665, lon: 126.9780 },
-    { name: "Bangkok", lat: 13.7563, lon: 100.5018 },
-    { name: "Jakarta", lat: -6.2088, lon: 106.8456 },
-    { name: "Manila", lat: 14.5995, lon: 120.9842 },
-    { name: "Melbourne", lat: -37.8136, lon: 144.9631 },
-    { name: "Auckland", lat: -36.8485, lon: 174.7633 },
-    { name: "Honolulu", lat: 21.3069, lon: -157.8583 },
-    { name: "Reykjavik", lat: 64.1466, lon: -21.9426 }
-];
 
 // ── Settings Synchronous Updater ─────────────────────────────────────────
 function updateSettingsScope(themePath) {
@@ -464,21 +405,11 @@ function updateSettingsScope(themePath) {
 
 // ── Bind UI Event Listeners ───────────────────────────────────────────────
 async function initSettingsUI() {
-    // 1. Wire the exit button — fully quits the engine so the user never needs Task Manager
-    const quitBtn = document.getElementById('quitEngineBtn');
-    if (quitBtn && !quitBtn._wired) {
-        quitBtn._wired = true;
-        quitBtn.addEventListener('click', async () => {
-            console.log('[Novaframe] Exit button clicked — quitting engine');
-            try {
-                await invoke('quit_engine');
-            } catch (err) {
-                console.error('[Novaframe] quit_engine invoke failed:', err);
-            }
-        });
-    }
-
-    // 2. Wire the Browse Marketplace and reload buttons
+    // Quit + Browse Marketplace are wired by wireCriticalControls() at the
+    // bottom of this file — that runs unconditionally at module scope, so those
+    // two buttons keep working even if this function throws part-way through.
+    // They used to be wired here as well; the `_wired` guard made it harmless
+    // but left two places to change one button's behaviour.
     const selector = document.getElementById('themeSelector');
     if (selector) {
         selector.addEventListener('change', async (e) => {
@@ -498,17 +429,7 @@ async function initSettingsUI() {
         });
     }
 
-    const openStoreBtn = document.getElementById('openStoreBtn');
-    if (openStoreBtn && !openStoreBtn._wired) {
-        openStoreBtn._wired = true;
-        openStoreBtn.addEventListener('click', async () => {
-            await invoke('open_storefront_window').catch(err =>
-                console.error("[Novaframe] open_storefront_window failed:", err)
-            );
-        });
-    }
-
-    // 3. Wire the "Launch on startup" toggle
+    // Wire the "Launch on startup" toggle
     const autostartToggle = document.getElementById('autostartToggle');
     if (autostartToggle) {
         try {
@@ -1103,7 +1024,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 
 import {
-    relaunchApp,
     checkAndInstallUpdate,
     setWelcomeVisible,
     showOnboardingOnce,
@@ -1154,14 +1074,6 @@ if (isSettingsWindow()) {
         }
     }, 2500);
 }
-
-// ── Global DOM Click Diagnostic Listener ──────────────────────────────────────
-document.addEventListener('click', (e) => {
-    const targetId = e.target.id || e.target.tagName || 'unknown';
-    invoke('log_from_js', {
-        message: `[DOM-CLICK] target=${targetId} mode=${getMode()}`
-    }).catch(() => {});
-}, true);
 
 // ── Top-level fail-open control wiring ──────────────────────────────────────
 function wireCriticalControls() {

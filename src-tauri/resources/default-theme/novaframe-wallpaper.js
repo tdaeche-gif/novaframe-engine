@@ -38,15 +38,28 @@
     var onSettings = opts.onSettings || function () {};
 
     var isPreview = false;
+    var isDebug = false;
     try {
-      isPreview = new URLSearchParams(global.location.search).get('preview') === 'true';
+      var params = new URLSearchParams(global.location.search);
+      isPreview = params.get('preview') === 'true';
+      isDebug = params.get('debug') === 'true';
     } catch (_) {}
 
     // Previews (marketplace grid thumbnails) don't need full fps.
     var effectiveFps = isPreview ? Math.min(fps || 30, 10) : fps;
     var frameInterval = effectiveFps > 0 ? 1000 / effectiveFps : 0;
 
+    // Measured display refresh period, learned from the gap between consecutive
+    // rAF callbacks. The pacing gate needs to know this: rAF only fires on
+    // refresh boundaries, which almost never line up with the requested
+    // interval, so a naive `now - lastDraw < frameInterval` test always lands on
+    // the boundary AFTER the one it wanted and undershoots the target. Seeded at
+    // 60Hz and corrected within the first few frames.
+    var refreshMs = 1000 / 60;
+    var lastRafTs = 0;
+
     var rafId = null;
+    var timerId = null;
     var running = false;         // start() called, not destroyed
     var occluded = false;        // engine reports hidden / behind fullscreen / paused
     // Whether we're running inside the Novaframe engine (vs a plain browser tab,
@@ -56,7 +69,7 @@
     // so once engine-controlled we trust `occluded` alone and ignore
     // document.hidden, otherwise we'd pause the wallpaper forever.
     var engineControlled = false;
-    var lastDraw = -Infinity;
+    var nextDrawAt = 0;   // deadline for the next draw, advanced on a fixed grid
     var lastTs = 0;
     var frameCount = 0;
     var width = 0, height = 0, dpr = 1;
@@ -80,25 +93,81 @@
     var fpsWindowStart = 0;
     var fpsWindowFrames = 0;
 
+    // Schedule the next frame.
+    //
+    // Previously this was an unconditional requestAnimationFrame every frame,
+    // with an early return when under the interval. That skips the DRAW but not
+    // the WAKE: at a 30fps target on a 120Hz display the JS thread and the
+    // compositor still woke 120x/second, so "30 FPS (Power Saver)" saved far
+    // less than the label implies.
+    //
+    // When the target is meaningfully below the display refresh rate, sleep the
+    // remaining time on a timer first and only then ask for a frame. The loop
+    // genuinely idles between draws. When the target is at or above refresh
+    // (frameInterval 0, or shorter than one frame) it falls through to plain
+    // rAF, which is already optimal.
+    function schedule(now) {
+      var wait = frameInterval ? nextDrawAt - refreshMs / 2 - now : 0;
+      // Only take the timer path when it actually skips at least one refresh.
+      // At 60fps-on-60Hz the wait is under one frame and a timer would just add
+      // a hop before the rAF we were going to get anyway.
+      if (wait > refreshMs) {
+        timerId = global.setTimeout(function () {
+          timerId = null;
+          if (!isActive()) { rafId = null; return; }
+          rafId = global.requestAnimationFrame(loop);
+        }, wait);
+      } else {
+        rafId = global.requestAnimationFrame(loop);
+      }
+    }
+
     function loop(now) {
       // When inactive, do NOT reschedule — this is what makes pause truly free.
       if (!isActive()) { rafId = null; return; }
-      rafId = global.requestAnimationFrame(loop);
-      if (frameInterval && now - lastDraw < frameInterval) return;
+
+      // Learn the refresh period from consecutive callbacks. Smallest recent gap
+      // wins: a gap can be stretched by a slow frame elsewhere, never shortened
+      // below the true refresh period.
+      if (lastRafTs) {
+        var gap = now - lastRafTs;
+        if (gap > 1 && gap < refreshMs) refreshMs = gap;
+      }
+      lastRafTs = now;
+
+      // Draw when we're within half a refresh of the deadline — the boundary
+      // nearest the target, rather than always the one after it.
+      if (frameInterval && now < nextDrawAt - refreshMs / 2) {
+        schedule(now);
+        return;
+      }
+
       var dt = lastTs ? now - lastTs : 0;
-      lastDraw = now;
       lastTs = now;
       frameCount++;
 
-      // Live FPS verification logging
-      fpsWindowFrames++;
-      if (!fpsWindowStart) {
-        fpsWindowStart = now;
-      } else if (now - fpsWindowStart >= 2000) {
-        var measuredFps = Math.round((fpsWindowFrames * 1000) / (now - fpsWindowStart));
-        console.log('[Novaframe Runtime] Live Measured FPS: ' + measuredFps + ' (Target: ' + (fps || 30) + ' FPS)');
-        fpsWindowStart = now;
-        fpsWindowFrames = 0;
+      // Advance the deadline on a fixed grid rather than from `now`, so the
+      // error of each frame doesn't accumulate. This is what lets a target that
+      // isn't a whole divisor of the refresh rate still average out correctly —
+      // 30fps on 144Hz alternates 4- and 5-frame gaps instead of locking to one.
+      // Resync if we've fallen more than a full interval behind (tab throttled,
+      // machine asleep) so we don't burst to catch up.
+      nextDrawAt += frameInterval;
+      if (nextDrawAt < now) nextDrawAt = now + frameInterval;
+      schedule(now);
+
+      // Live FPS verification. Debug-only: this fired every 2s in every theme
+      // iframe for the lifetime of the app, into a console nobody can open.
+      if (isDebug) {
+        fpsWindowFrames++;
+        if (!fpsWindowStart) {
+          fpsWindowStart = now;
+        } else if (now - fpsWindowStart >= 2000) {
+          var measuredFps = Math.round((fpsWindowFrames * 1000) / (now - fpsWindowStart));
+          console.log('[Novaframe Runtime] Live Measured FPS: ' + measuredFps + ' (Target: ' + (fps || 30) + ' FPS)');
+          fpsWindowStart = now;
+          fpsWindowFrames = 0;
+        }
       }
 
       onFrame({
@@ -108,13 +177,14 @@
     }
 
     function ensureLoop() {
-      if (rafId == null) {
-        lastDraw = -Infinity; // draw immediately on resume
+      if (rafId == null && timerId == null) {
+        nextDrawAt = 0; // deadline in the past → draw immediately on resume
         rafId = global.requestAnimationFrame(loop);
       }
     }
     function stopLoop() {
       if (rafId != null) { global.cancelAnimationFrame(rafId); rafId = null; }
+      if (timerId != null) { global.clearTimeout(timerId); timerId = null; }
     }
     function syncLoop() {
       if (isActive()) ensureLoop(); else stopLoop();

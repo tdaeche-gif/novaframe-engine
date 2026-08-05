@@ -41,7 +41,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' asset: theme: novaframe: http://theme.localhost https://fonts.googleapis.com https://fonts.gstatic.com; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' asset: theme: http://theme.localhost data: blob:; connect-src 'self' theme: http://theme.localhost https://api.novaframe.co.uk; frame-src theme: http://theme.localhost asset: novaframe:; object-src 'none'; base-uri 'none';",
+      "csp": "default-src 'self' asset: theme: novaframe: http://theme.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' asset: theme: http://theme.localhost data: blob:; connect-src 'self' theme: http://theme.localhost https://api.novaframe.co.uk; frame-src theme: http://theme.localhost asset: novaframe:; object-src 'none'; base-uri 'none';",
       "assetProtocol": {
         "enable": true,
         "scope": [
@@ -60,7 +60,8 @@
     },
     "updater": {
       "endpoints": [
-        "https://api.novaframe.co.uk/api/engine/updates/{{target}}/{{current_version}}"
+        "https://api.novaframe.co.uk/api/engine/updates/{{target}}/{{current_version}}",
+        "https://github.com/tdaeche-gif/novaframe-engine/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM1NERFMzdDNTNDNTNENzMKUldSelBjVlRmT05OTmFxSWVpaEFxT3U4NFJ5L05haHJQc3NwQlZLajAydVJrNm9KS2Q4TVp6dk8K"
     }

@@ -5,9 +5,10 @@ description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
 
-[lib]
-name = "novaframe_engine_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# No [lib] section: src/lib.rs was untouched project scaffolding (a second
+# tauri::Builder plus a `greet` command) that nothing ever called, and building
+# it as staticlib + cdylib + rlib meant three extra artifacts compiled on every
+# build. main.rs is the only entry point.
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

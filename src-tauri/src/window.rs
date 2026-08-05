@@ -124,12 +124,19 @@ pub fn place_settings_window(
 }
 
 /// Expands the settings panel webview to its full width.
+///
+/// Deliberately does NOT call set_focus(). The hover-poll loops call this every
+/// time the cursor crosses the right screen edge — a thing people do constantly
+/// reaching for a scrollbar — and focusing here yanked focus out of whatever the
+/// user was typing in. The panel still takes focus when actually clicked
+/// (`acceptFirstMouse` is set on the window), and the tray "Show Settings" item
+/// calls set_focus() itself before expanding, which is the one path where
+/// raising the panel IS the user's explicit intent.
 #[tauri::command]
 pub fn expand_settings_panel(window: WebviewWindow) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         place_settings_window(&window, &monitor, 360.0, 650.0);
     }
-    let _ = window.set_focus();
 }
 
 /// Collapses the settings panel webview to its minimal width.

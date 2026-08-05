@@ -41,13 +41,36 @@ jobs:
       - name: cargo check
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
-      # Non-blocking for now (continue-on-error) so pre-existing style/lint debt
-      # doesn't red-gate the build. Flip these to blocking once the codebase is
-      # clean: remove continue-on-error.
+      # Blocking. Covers is_safe_theme_name, deep-link token decoding, and the
+      # install path (flat vs wrapper-folder zips, entry/size caps, traversal) —
+      # the extract+rename logic where a silent failure means a paid wallpaper
+      # never shows up in the dropdown.
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # Advisory: rustfmt would rewrite ~970 lines of existing code, which would
+      # bury real changes in reformatting noise. Keep it visible, not blocking,
+      # until someone does that reformat as its own commit.
       - name: rustfmt (advisory)
         continue-on-error: true
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
-      - name: clippy (advisory)
-        continue-on-error: true
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+      # Blocking as of 2026-08-04: the tree is clean at -D warnings across all
+      # targets. Keep it that way — this is the cheapest defect gate available.
+      - name: clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  # The frontend bundle is only built during a release (tauri.conf.json's
+  # beforeBuildCommand), so a syntax error in app.js or a bad import used to
+  # reach a tag before anyone noticed. One cheap Linux job closes that.
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: install dependencies
+        run: npm ci
+      - name: build bundle
+        run: npm run build

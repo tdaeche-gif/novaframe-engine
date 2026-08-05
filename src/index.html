@@ -4,9 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Novaframe Engine</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Outfit is self-hosted (see @font-face in style.css). It used to load from
+         fonts.googleapis.com, which meant a network round trip on the critical
+         path of every launch, fallback-font typography whenever the machine was
+         offline, a request to Google from every user's desktop on every start,
+         and two extra origins in the CSP. -->
+    <link rel="preload" href="assets/fonts/outfit-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="style.css">
     <!-- Resolve the window role (main | settings) SYNCHRONOUSLY, before first
          paint. app.bundle.js also does this in initDualWindowSystem(), but that

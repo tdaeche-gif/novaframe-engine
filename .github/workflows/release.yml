@@ -89,19 +89,66 @@ jobs:
           done
           echo "WIN_DEST=$WIN_DEST" >> "$GITHUB_ENV"
           echo "MAC_DEST=$MAC_DEST" >> "$GITHUB_ENV"
+      - name: publish checksums
+        run: |
+          cd assets
+          WIN_SHA=$(shasum -a 256 *.exe | cut -d' ' -f1)
+          MAC_SHA=$(shasum -a 256 *.dmg | cut -d' ' -f1)
+          echo "WIN_SHA=$WIN_SHA" >> "$GITHUB_ENV"
+          echo "MAC_SHA=$MAC_SHA" >> "$GITHUB_ENV"
+          echo "sha256(windows) = $WIN_SHA"
+          echo "sha256(macos)   = $MAC_SHA"
+
       - name: mark version as latest in engine_releases
         run: |
-          # Demote previous latest, then insert the new row.
-          curl -sf -X PATCH \
-            "$SUPABASE_URL/rest/v1/engine_releases?is_latest=eq.true" \
-            -H "Authorization: Bearer $SERVICE_KEY" \
-            -H "apikey: $SERVICE_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"is_latest": false}' > /dev/null
+          # INSERT FIRST, then demote — deliberately this order.
+          #
+          # The previous version demoted every is_latest row and only then
+          # inserted the new one. If that insert failed (network, schema, RLS)
+          # NO row was latest and the storefront /download page had nothing to
+          # serve, with no rollback and no check to notice. Inserting first
+          # means the worst case is two latest rows — which degrades to
+          # "serves one of two good builds" instead of "serves nothing".
           curl -sf -X POST \
             "$SUPABASE_URL/rest/v1/engine_releases" \
             -H "Authorization: Bearer $SERVICE_KEY" \
             -H "apikey: $SERVICE_KEY" \
             -H "Content-Type: application/json" \
             -d "{\"version\": \"$VERSION\", \"windows_url\": \"$WIN_DEST\", \"mac_url\": \"$MAC_DEST\", \"release_notes\": \"Novaframe Engine v$VERSION\", \"is_latest\": true}" > /dev/null
+
+          # Checksums go in a SEPARATE, non-fatal call: the windows_sha256 /
+          # mac_sha256 columns arrive with docs/migrations/2026-08-04-engine-releases-checksums.sql,
+          # and a release must not fail just because that hasn't been applied yet.
+          curl -s -X PATCH \
+            "$SUPABASE_URL/rest/v1/engine_releases?version=eq.$VERSION" \
+            -H "Authorization: Bearer $SERVICE_KEY" \
+            -H "apikey: $SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"windows_sha256\": \"$WIN_SHA\", \"mac_sha256\": \"$MAC_SHA\"}" \
+            > /dev/null || echo "note: checksum columns not present yet — run the migration"
+
+          curl -sf -X PATCH \
+            "$SUPABASE_URL/rest/v1/engine_releases?is_latest=eq.true&version=neq.$VERSION" \
+            -H "Authorization: Bearer $SERVICE_KEY" \
+            -H "apikey: $SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"is_latest": false}' > /dev/null
           echo "engine_releases updated to v$VERSION"
+
+      - name: verify exactly one latest release
+        run: |
+          # Without this the job could go green on a half-applied publish and
+          # the first sign of trouble would be a customer reporting a dead
+          # download page.
+          BODY=$(curl -sf \
+            "$SUPABASE_URL/rest/v1/engine_releases?is_latest=eq.true&select=version" \
+            -H "Authorization: Bearer $SERVICE_KEY" \
+            -H "apikey: $SERVICE_KEY")
+          COUNT=$(echo "$BODY" | jq 'length')
+          LATEST=$(echo "$BODY" | jq -r '.[0].version // ""')
+          echo "latest rows: $COUNT -> $BODY"
+          if [ "$COUNT" != "1" ] || [ "$LATEST" != "$VERSION" ]; then
+            echo "::error::expected exactly one latest row at v$VERSION, got $COUNT ($LATEST)"
+            exit 1
+          fi
+          echo "verified: engine_releases latest = v$VERSION"

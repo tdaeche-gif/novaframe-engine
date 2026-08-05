@@ -1,6 +1,16 @@
 // ── Mouse Relay Module ──────────────────────────────────────────────────────────
 // Dynamic cursor event forwarding to interactive theme iframes.
-// Attached ONLY when an interactive theme is active to maximize CPU efficiency.
+//
+// NOTE: despite what this header used to claim, the relay is currently attached
+// for EVERY theme — themeManager.mountIframe() calls enableMouseRelay()
+// unconditionally. No shipped wallpaper consumes `novaframe-pointer` (the house
+// build rule is "no pointer"), so this is a mousemove listener running for
+// nothing on most installs.
+//
+// To make it opt-in: add `"interactive": true` to the manifests of any theme
+// that actually reads pointer messages, then gate the enableMouseRelay() call
+// in themeManager.js on that flag. Left as-is for now because flipping it blind
+// would silently break any theme that does use it.
 
 let isAttached = false;
 let mousePending = false;

@@ -41,6 +41,118 @@ pub fn sync_shared_runtime(app: &tauri::AppHandle) {
 
 static INSTALL_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+// ── Install limits ───────────────────────────────────────────────────────────
+// A theme is HTML/JS/GLSL plus a few textures; the largest shipped wallpaper is
+// well under 50 MB. These caps exist so a wrong URL, a truncated CDN response or
+// a hostile archive cannot fill the user's disk.
+//
+// The extraction caps matter most: nothing about a zip's *compressed* size
+// bounds what it expands to. A 1 MB archive of compressed zeroes decompresses to
+// hundreds of GB, and `std::io::copy` will happily write every byte.
+const MAX_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
+const MAX_EXTRACTED_BYTES: u64 = 500 * 1024 * 1024;
+const MAX_ZIP_ENTRIES: usize = 5_000;
+
+/// Locate the directory holding the theme manifest inside an extracted archive.
+///
+/// Returns `start` itself for a flat zip, or the single wrapper folder one level
+/// down for a zip packaged with a containing directory. Whatever this returns is
+/// what gets moved into the themes directory — see the rename in
+/// `download_and_install_theme`.
+pub(crate) fn find_manifest_dir(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let has_manifest = |p: &std::path::Path| {
+        p.join("manifest.json").exists() || p.join("engine_manifest.json").exists()
+    };
+
+    if has_manifest(start) {
+        return Some(start.to_path_buf());
+    }
+    if let Ok(read_dir) = std::fs::read_dir(start) {
+        for entry in read_dir.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let name = p.file_name().unwrap_or_default().to_string_lossy();
+                if !name.starts_with('.') && !name.starts_with("__MACOSX") && has_manifest(&p) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract a downloaded theme archive into `staging_dir`, enforcing entry-count
+/// and total-size caps. Blocking; call under `spawn_blocking`.
+fn extract_zip(zip_path: &std::path::Path, staging_dir: &std::path::Path) -> Result<(), String> {
+    use std::fs;
+
+    let file = fs::File::open(zip_path).map_err(|e| format!("Failed to open temp zip: {}", e))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {}", e))?;
+
+    if archive.len() > MAX_ZIP_ENTRIES {
+        return Err(format!(
+            "Refusing archive: {} entries exceeds the {} entry limit",
+            archive.len(),
+            MAX_ZIP_ENTRIES
+        ));
+    }
+
+    fs::create_dir_all(staging_dir)
+        .map_err(|e| format!("Failed to create staging dir: {}", e))?;
+
+    let mut extracted: u64 = 0;
+
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to access zip file: {}", e))?;
+
+        let entry_name = file.name().to_string();
+
+        if entry_name.starts_with("__MACOSX/") || entry_name == "__MACOSX" {
+            continue;
+        }
+
+        // enclosed_name() is what defends against `../` entries and absolute
+        // paths — it returns None for anything that would escape the root.
+        let outpath = match file.enclosed_name() {
+            Some(path) => staging_dir.join(path),
+            None => continue,
+        };
+
+        if file.is_dir() {
+            fs::create_dir_all(&outpath)
+                .map_err(|e| format!("Failed to create extracted dir: {}", e))?;
+        } else {
+            if let Some(p) = outpath.parent() {
+                if !p.exists() {
+                    fs::create_dir_all(p)
+                        .map_err(|e| format!("Failed to create parent dir: {}", e))?;
+                }
+            }
+            let mut outfile = fs::File::create(&outpath)
+                .map_err(|e| format!("Failed to create extracted file: {}", e))?;
+
+            // Cap per entry against the REMAINING budget, so the running total
+            // is what's enforced rather than any single file's size. `take`
+            // stops the copy at the limit instead of trusting the header.
+            let remaining = MAX_EXTRACTED_BYTES.saturating_sub(extracted);
+            let written = std::io::copy(&mut std::io::Read::take(&mut file, remaining + 1), &mut outfile)
+                .map_err(|e| format!("Failed to copy zip contents: {}", e))?;
+            extracted += written;
+            if extracted > MAX_EXTRACTED_BYTES {
+                return Err(format!(
+                    "Refusing archive: extracted size exceeds the {} byte limit",
+                    MAX_EXTRACTED_BYTES
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn handle_engine_apply(app: tauri::AppHandle, token: String) -> Result<String, String> {
     let _guard = INSTALL_MUTEX.lock().await;
@@ -190,66 +302,16 @@ pub async fn download_and_install_theme(
         staging_dir
     );
 
-    let file =
-        fs::File::open(&temp_zip_path).map_err(|e| format!("Failed to open temp zip: {}", e))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {}", e))?;
-
-    fs::create_dir_all(&staging_dir)
-        .map_err(|e| format!("Failed to create staging dir: {}", e))?;
-
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| format!("Failed to access zip file: {}", e))?;
-
-        let entry_name = file.name().to_string();
-
-        if entry_name.starts_with("__MACOSX/") || entry_name == "__MACOSX" {
-            continue;
-        }
-
-        let outpath = match file.enclosed_name() {
-            Some(path) => staging_dir.join(path),
-            None => continue,
-        };
-
-        if file.is_dir() {
-            fs::create_dir_all(&outpath)
-                .map_err(|e| format!("Failed to create extracted dir: {}", e))?;
-        } else {
-            if let Some(p) = outpath.parent() {
-                if !p.exists() {
-                    fs::create_dir_all(p)
-                        .map_err(|e| format!("Failed to create parent dir: {}", e))?;
-                }
-            }
-            let mut outfile = fs::File::create(&outpath)
-                .map_err(|e| format!("Failed to create extracted file: {}", e))?;
-            std::io::copy(&mut file, &mut outfile)
-                .map_err(|e| format!("Failed to copy zip contents: {}", e))?;
-        }
+    // Extraction is entirely blocking file I/O. Running it inline on a tokio
+    // worker (this command is `async`, and holds INSTALL_MUTEX across a download
+    // whose timeout is 180s) pins a runtime thread for the duration.
+    {
+        let zip_path = temp_zip_path.clone();
+        let staging = staging_dir.clone();
+        tokio::task::spawn_blocking(move || extract_zip(&zip_path, &staging))
+            .await
+            .map_err(|e| format!("Extraction task failed: {}", e))??;
     }
-
-    let find_manifest_dir = |start: &std::path::Path| -> Option<std::path::PathBuf> {
-        if start.join("manifest.json").exists() || start.join("engine_manifest.json").exists() {
-            return Some(start.to_path_buf());
-        }
-        if let Ok(read_dir) = fs::read_dir(start) {
-            for entry in read_dir.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    let name = p.file_name().unwrap_or_default().to_string_lossy();
-                    if !name.starts_with('.') && !name.starts_with("__MACOSX") {
-                        if p.join("manifest.json").exists() || p.join("engine_manifest.json").exists() {
-                            return Some(p);
-                        }
-                    }
-                }
-            }
-        }
-        None
-    };
 
     let target_dir = match find_manifest_dir(&staging_dir) {
         Some(dir) => dir,
@@ -311,11 +373,23 @@ pub async fn download_and_install_theme(
     );
 
     if named_dir.exists() {
-        named_dir = themes_dir.join(&final_name);
         let _ = fs::remove_dir_all(&named_dir);
     }
 
-    fs::rename(&staging_dir, &named_dir)
+    // Move `target_dir`, NOT `staging_dir`.
+    //
+    // find_manifest_dir() deliberately looks one level down, so a zip built with
+    // a top-level wrapper folder resolves to `staging/<wrapper>`. Renaming
+    // `staging_dir` in that case installed the theme as
+    // `<themes>/<slug>/<wrapper>/manifest.json` — one level too deep for
+    // scanThemes(), which reads `<themes>/<name>/manifest.json`. The install
+    // reported success and the wallpaper silently never appeared in the
+    // dropdown. It also put .nova_meta.json a level below where
+    // read_marketplace_id() looks, so re-applying the same wallpaper never
+    // matched and piled up `slug-2`, `slug-3`, ... forever.
+    //
+    // The TempDirGuard on staging_dir cleans up the now-empty wrapper.
+    fs::rename(&target_dir, &named_dir)
         .map_err(|e| format!("Failed to move staged theme into place: {}", e))?;
 
     dlog(&app, &format!("[install] DONE installed at {:?} -> emitting theme-installed", named_dir));
@@ -358,12 +432,33 @@ async fn download_to_file(
         return Err(format!("Download failed with status: {}", response.status()));
     }
 
+    // Reject an oversized body before a single byte hits the disk when the
+    // server is honest enough to declare a length.
+    if let Some(len) = response.content_length() {
+        if len > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "Refusing download: {} bytes exceeds the {} byte limit",
+                len, MAX_DOWNLOAD_BYTES
+            ));
+        }
+    }
+
     let mut temp_file =
         std::fs::File::create(dest).map_err(|e| format!("Failed to create temp file: {}", e))?;
 
+    // And enforce it again while streaming, because Content-Length is a hint,
+    // not a promise — a chunked response can omit or lie about it.
+    let mut written: u64 = 0;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Error while downloading: {}", e))?;
+        written += chunk.len() as u64;
+        if written > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "Aborted download: exceeded the {} byte limit",
+                MAX_DOWNLOAD_BYTES
+            ));
+        }
         temp_file
             .write_all(&chunk)
             .map_err(|e| format!("Error writing chunk: {}", e))?;
@@ -436,5 +531,137 @@ fn slugify_title(s: &str) -> String {
         trimmed.chars().take(80).collect()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Build a zip in a temp dir from (name, contents) pairs. Entry names with a
+    /// trailing '/' become directories.
+    fn make_zip(label: &str, entries: &[(&str, &[u8])]) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("nova-test-{}-{}", label, std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let zip_path = root.join("theme.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        let opts: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+        for (name, body) in entries {
+            if name.ends_with('/') {
+                w.add_directory(name.trim_end_matches('/'), opts).unwrap();
+            } else {
+                w.start_file(*name, opts).unwrap();
+                w.write_all(body).unwrap();
+            }
+        }
+        w.finish().unwrap();
+
+        let staging = root.join("staging");
+        (zip_path, staging)
+    }
+
+    #[test]
+    fn flat_zip_puts_manifest_at_the_root() {
+        let (zip, staging) = make_zip(
+            "flat",
+            &[("manifest.json", b"{}"), ("index.html", b"<html></html>")],
+        );
+        extract_zip(&zip, &staging).unwrap();
+
+        let target = find_manifest_dir(&staging).expect("manifest dir found");
+        assert_eq!(target, staging);
+        assert!(target.join("manifest.json").exists());
+    }
+
+    /// The install renames `target_dir` (not `staging_dir`) into place. For a zip
+    /// with a wrapper folder those differ — and renaming the wrong one installed
+    /// the theme one level too deep, where scanThemes() never found it.
+    #[test]
+    fn wrapper_folder_zip_resolves_to_the_inner_dir() {
+        let (zip, staging) = make_zip(
+            "wrapper",
+            &[
+                ("Deep Space/", b""),
+                ("Deep Space/manifest.json", b"{}"),
+                ("Deep Space/index.html", b"<html></html>"),
+            ],
+        );
+        extract_zip(&zip, &staging).unwrap();
+
+        let target = find_manifest_dir(&staging).expect("manifest dir found");
+        assert_ne!(target, staging, "must descend into the wrapper folder");
+        assert_eq!(target, staging.join("Deep Space"));
+        // What actually matters: the dir we move into place has the manifest at
+        // ITS root, so the installed theme is <themes>/<slug>/manifest.json.
+        assert!(target.join("manifest.json").exists());
+    }
+
+    #[test]
+    fn macosx_metadata_dir_is_not_mistaken_for_the_theme() {
+        let (zip, staging) = make_zip(
+            "macosx",
+            &[
+                ("__MACOSX/", b""),
+                ("__MACOSX/manifest.json", b"{}"),
+                ("Real Theme/", b""),
+                ("Real Theme/manifest.json", b"{}"),
+            ],
+        );
+        extract_zip(&zip, &staging).unwrap();
+
+        assert!(!staging.join("__MACOSX").exists(), "__MACOSX must be skipped");
+        assert_eq!(find_manifest_dir(&staging).unwrap(), staging.join("Real Theme"));
+    }
+
+    #[test]
+    fn rejects_archive_with_too_many_entries() {
+        let names: Vec<String> = (0..MAX_ZIP_ENTRIES + 1).map(|i| format!("f{}.txt", i)).collect();
+        let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+        let (zip, staging) = make_zip("manyentries", &entries);
+
+        let err = extract_zip(&zip, &staging).unwrap_err();
+        assert!(err.contains("entry limit"), "unexpected error: {}", err);
+    }
+
+    /// A zip bomb: tiny compressed, enormous expanded. Nothing about the archive
+    /// size bounds what io::copy will write, so the cap must be on output bytes.
+    #[test]
+    fn rejects_archive_that_expands_past_the_size_cap() {
+        let big = vec![0u8; 8 * 1024 * 1024]; // compresses to almost nothing
+        let mut entries: Vec<(String, &[u8])> = Vec::new();
+        for i in 0..80 {
+            entries.push((format!("blob{}.bin", i), &big[..]));
+        }
+        let refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, b)| (n.as_str(), *b)).collect();
+        let (zip, staging) = make_zip("bomb", &refs);
+
+        assert!(
+            std::fs::metadata(&zip).unwrap().len() < 1024 * 1024,
+            "test archive should be small on disk"
+        );
+        let err = extract_zip(&zip, &staging).unwrap_err();
+        assert!(err.contains("byte limit"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn path_traversal_entries_are_dropped() {
+        let (zip, staging) = make_zip(
+            "traversal",
+            &[
+                ("../../escaped.txt", b"nope"),
+                ("manifest.json", b"{}"),
+            ],
+        );
+        extract_zip(&zip, &staging).unwrap();
+
+        assert!(staging.join("manifest.json").exists());
+        assert!(!staging.parent().unwrap().join("escaped.txt").exists());
+        assert!(!staging.join("../../escaped.txt").exists());
     }
 }

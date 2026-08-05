@@ -42,24 +42,6 @@ fn set_settings_panel_locked(locked: bool) {
     SETTINGS_PANEL_LOCKED.store(locked, Ordering::Relaxed);
 }
 
-/// Anchor the settings window flush to the monitor's right edge, vertically
-/// centered, at the given LOGICAL size. Does all math in PHYSICAL pixels
-/// (monitor.position()/size() are already physical) and only converts to
-/// logical at the point Tauri requires it, rounding to the nearest physical
-/// pixel throughout.
-///
-/// Why: the previous version divided monitor position/size by scale_factor
-/// into logical f64s, added/subtracted logical widths, and handed the result
-/// to set_position(Logical). Every one of those divisions can produce a
-/// fractional logical value (e.g. a secondary monitor whose physical origin
-/// isn't a clean multiple of scale_factor); Tauri then multiplies back by
-/// scale_factor to get physical pixels, and the rounding at THAT point can
-/// land the window's right edge a pixel or two short of the true screen edge
-/// — reported as the cog "floating" a few px off the right side on macOS
-/// Retina displays. Computing entirely in physical pixels and rounding once,
-/// right before the set_size/set_position calls, removes that drift.
-
-
 #[tauri::command]
 fn log_from_js(app: tauri::AppHandle, message: String) {
     // Route JS console into the on-disk log too — the webview console is just as
@@ -81,17 +63,6 @@ fn quit_engine(app: tauri::AppHandle) {
     });
     app.exit(0);
 }
-
-// Async on purpose: a SYNC command runs on the main thread, and on Windows
-// building a webview window from the main thread inside a command DEADLOCKS
-// (WebviewWindowBuilder::build blocks on an event the blocked main loop can
-// never process). Symptom: storefront opens as a frozen white window and the
-// whole app hangs — settings dead, quit dead, Task Manager required. Async
-// commands run off the main loop and Tauri dispatches the actual window
-// creation to the main thread itself, which is also why this stays correct
-// on macOS.
-
-/// The theme every fresh install starts with.
 
 /// The theme every fresh install starts with.
 ///
@@ -129,7 +100,7 @@ fn provision_default_theme(app: &tauri::AppHandle) {
 
     for name in DEFAULT_THEME_FILES {
         let src = match app.path().resolve(
-            &format!("resources/default-theme/{}", name),
+            format!("resources/default-theme/{}", name),
             tauri::path::BaseDirectory::Resource,
         ) {
             Ok(p) => p,
@@ -150,19 +121,38 @@ fn provision_default_theme(app: &tauri::AppHandle) {
     dlog(app, &format!("[default-theme] provisioned {:?}", dest_dir));
 }
 
+/// Hard ceiling on engine-debug.log before it is rotated to `.old`. Two files at
+/// this size cap total on-disk logging at ~4 MB.
+///
+/// Without a cap this file grew forever: it is appended on every startup, layout
+/// pass and pause transition, and an engine left running for months on a user's
+/// machine has no code path that ever shrinks or deletes it.
+const LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
 /// Append a line to AppData/engine-debug.log. Release builds run as a Windows
 /// GUI-subsystem app with NO console, so println! is invisible in the field —
 /// this file is the only way to see what actually happened on a user's machine.
 /// Best-effort: never panics, silently no-ops if the path is unavailable.
+///
+/// Rotates at LOG_MAX_BYTES, keeping exactly one previous generation. Rotation
+/// happens before the write so the newest line always lands in the live file.
 pub(crate) fn dlog(app: &tauri::AppHandle, msg: &str) {
     use std::io::Write;
     println!("{}", msg);
     if let Ok(dir) = app.path().app_data_dir() {
         let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("engine-debug.log");
+
+        // Rotate before appending. rename() replaces any existing .old, so the
+        // history is capped at one generation rather than accumulating.
+        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) >= LOG_MAX_BYTES {
+            let _ = std::fs::rename(&path, dir.join("engine-debug.log.old"));
+        }
+
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join("engine-debug.log"))
+            .open(&path)
         {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -495,6 +485,15 @@ fn main() {
             dlog(&handle, &format!("==== engine start v{} os={} ====",
                 env!("CARGO_PKG_VERSION"), std::env::consts::OS));
 
+            // The engine has no ordinary window — the wallpaper is a desktop
+            // underlay and the panel is a 30px tab docked to the screen edge.
+            // Without Accessory, macOS still gave it a Dock icon and swapped the
+            // menu bar to "Novaframe" every time the app was activated, which
+            // the hover poll did on every accidental brush of the right edge.
+            // The tray icon is the intended affordance.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             // Ensure the shared three.js runtime is present before any theme loads.
             installer::sync_shared_runtime(&handle);
 
@@ -564,14 +563,37 @@ fn main() {
             {
                 let fs_handle = handle.clone();
                 std::thread::spawn(move || {
+                    // desktop_is_covered() runs a full EnumWindows and does five
+                    // syscalls PER top-level window. At a flat 800ms that is well
+                    // over a thousand syscalls a second, permanently, in an app
+                    // that is meant to be invisible.
+                    //
+                    // Coverage changes when the user switches or resizes a window
+                    // — bursty, not continuous. So poll fast while the state is
+                    // moving and back off once it settles: reaction stays snappy
+                    // when it matters and idle cost drops ~4x when it doesn't.
+                    const FAST_MS: u64 = 800;
+                    const IDLE_MS: u64 = 3_000;
+                    const STABLE_TICKS_BEFORE_BACKOFF: u32 = 5;
+
                     let mut last_fullscreen = false;
                     let mut last_covered = false;
+                    let mut stable_ticks: u32 = 0;
+
                     loop {
-                        std::thread::sleep(std::time::Duration::from_millis(800));
+                        let interval = if stable_ticks >= STABLE_TICKS_BEFORE_BACKOFF {
+                            IDLE_MS
+                        } else {
+                            FAST_MS
+                        };
+                        std::thread::sleep(std::time::Duration::from_millis(interval));
+
+                        let mut changed = false;
 
                         let fullscreen = is_fullscreen_app_active();
                         if fullscreen != last_fullscreen {
                             last_fullscreen = fullscreen;
+                            changed = true;
                             FULLSCREEN_ACTIVE.store(fullscreen, Ordering::Relaxed);
                             recompute_wallpaper_visibility(&fs_handle);
                             dlog(&fs_handle, &format!("[pause] fullscreen app active={}", fullscreen));
@@ -582,10 +604,15 @@ fn main() {
                         let covered = if fullscreen { last_covered } else { desktop_is_covered() };
                         if covered != last_covered {
                             last_covered = covered;
+                            changed = true;
                             WINDOW_OCCLUDED.store(covered, Ordering::Relaxed);
                             recompute_wallpaper_visibility(&fs_handle);
                             dlog(&fs_handle, &format!("[pause] desktop covered={}", covered));
                         }
+
+                        // Any transition drops straight back to the fast poll, so
+                        // the tick after a change is never a slow one.
+                        stable_ticks = if changed { 0 } else { stable_ticks.saturating_add(1) };
                     }
                 });
             }
@@ -868,18 +895,32 @@ fn main() {
                 {
                     let settings_clone = settings_window.clone();
                     std::thread::spawn(move || {
+                        // Proximity backoff, mirroring the macOS loop above.
+                        // This used to poll a flat 150ms forever and make three
+                        // runtime calls per tick — ~7 polls and ~20 calls a
+                        // second, permanently, on the majority platform. The
+                        // cursor is nowhere near the right screen edge almost
+                        // all of the time, and while it isn't, sub-second
+                        // reaction buys nothing.
+                        const NEAR_MS: u64 = 150;
+                        const FAR_MS: u64 = 800;
+                        // Matches the macOS threshold at main.rs's NSEvent loop.
+                        const NEAR_SLOP_PX: f64 = 50.0;
+
                         let mut was_hovered = false;
+                        let mut sleep_ms = FAR_MS;
                         loop {
                             if state::SHUTDOWN_SIGNAL.load(Ordering::Relaxed) {
                                 break;
                             }
-                            std::thread::sleep(std::time::Duration::from_millis(150));
+                            std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
 
                             if SETTINGS_PANEL_LOCKED.load(Ordering::Relaxed) {
                                 if !was_hovered {
                                     was_hovered = true;
                                     window::expand_settings_panel(settings_clone.clone());
                                 }
+                                sleep_ms = NEAR_MS;
                                 continue;
                             }
 
@@ -896,6 +937,13 @@ fn main() {
                                 && cursor.x <= (pos.x + size.width as i32) as f64
                                 && cursor.y >= pos.y as f64
                                 && cursor.y <= (pos.y + size.height as i32) as f64;
+
+                            // "Near" is generous on purpose: the panel is docked
+                            // to the right screen edge, so approaching it from
+                            // the left is the only way in. Poll fast once the
+                            // cursor is within slop of that edge, slow otherwise.
+                            let is_near = cursor.x >= (pos.x as f64 - NEAR_SLOP_PX);
+                            sleep_ms = if is_near || is_hovered { NEAR_MS } else { FAR_MS };
 
                             if is_hovered != was_hovered {
                                 was_hovered = is_hovered;
@@ -942,9 +990,9 @@ mod tests {
         use super::deeplink::decode_deeplink_token;
         let token = "eyJhbGciOiJIUzI1NiJ9+test/token==";
         let decoded = decode_deeplink_token(token);
-        assert_eq!(decoded, Some("eyJhbGciOiJIUzI1NiJ9+test/token==").map(String::from));
+        assert_eq!(decoded.as_deref(), Some("eyJhbGciOiJIUzI1NiJ9+test/token=="));
 
         let encoded_plus = "hello%2Bworld";
-        assert_eq!(decode_deeplink_token(encoded_plus), Some("hello+world").map(String::from));
+        assert_eq!(decode_deeplink_token(encoded_plus).as_deref(), Some("hello+world"));
     }
 }
