@@ -2,7 +2,7 @@
   "name": "novaframe-engine",
   "private": true,
   "//version": "Keep in sync with src-tauri/Cargo.toml and src-tauri/tauri.conf.json on every release.",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "type": "module",
   "scripts": {
     "build": "esbuild src/app.js --bundle --outfile=src/app.bundle.js --platform=browser --target=es2020 --format=iife",

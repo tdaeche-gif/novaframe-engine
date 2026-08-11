@@ -17,7 +17,7 @@ use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSPoint, NSRect};
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 // ── Autostart (launch on login) ─────────────────────────────────────────────
 #[tauri::command]
@@ -639,6 +639,7 @@ fn main() {
 
                 let occ_handle = handle.clone();
                 std::thread::spawn(move || {
+                    use std::sync::atomic::AtomicBool;
                     let last_occ = std::sync::Arc::new(AtomicBool::new(false));
                     let logged_first_occ = std::sync::Arc::new(AtomicBool::new(false));
                     let last_fs = std::sync::Arc::new(AtomicBool::new(false));
