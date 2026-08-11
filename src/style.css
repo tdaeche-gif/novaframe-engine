@@ -84,6 +84,7 @@ canvas {
 html[data-mode="main"] #settingsPanel { display: none; }
 html[data-mode="settings"] #container { display: none; }
 html[data-mode="settings"] #welcomeOverlay { display: none !important; }
+html[data-mode="settings"] #onboardingOverlay { display: none !important; }
 
 #settingsPanel {
     position: absolute;

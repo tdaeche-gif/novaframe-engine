@@ -93,6 +93,7 @@ export function setWelcomeVisible(visible) {
 export async function showOnboardingOnce(config, saveConfigFn) {
     const overlay = document.getElementById('onboardingOverlay');
     if (!overlay) return;
+    if (!isMainWindow()) return;
     if (config?.onboarding_seen === true) return;
 
     if (config) {
