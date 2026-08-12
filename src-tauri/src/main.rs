@@ -399,8 +399,8 @@ fn desktop_is_covered() -> bool {
             }
             let mut buf = [0u16; 64];
             let n = GetClassNameW(hwnd, &mut buf) as usize;
-            let class = String::from_utf16_lossy(&buf[..n]);
-            if SHELL_CLASSES.iter().any(|c| *c == class) {
+            let slice = &buf[..n];
+            if SHELL_CLASSES.iter().any(|c| c.encode_utf16().eq(slice.iter().copied())) {
                 return TRUE;
             }
             let mut r = RECT::default();
@@ -573,7 +573,7 @@ fn main() {
                     // moving and back off once it settles: reaction stays snappy
                     // when it matters and idle cost drops ~4x when it doesn't.
                     const FAST_MS: u64 = 800;
-                    const IDLE_MS: u64 = 3_000;
+                    const IDLE_MS: u64 = 10_000;
                     const STABLE_TICKS_BEFORE_BACKOFF: u32 = 5;
 
                     let mut last_fullscreen = false;
