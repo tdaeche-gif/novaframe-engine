@@ -101,19 +101,23 @@ jobs:
 
       - name: mark version as latest in engine_releases
         run: |
-          # INSERT FIRST, then demote — deliberately this order.
-          #
-          # The previous version demoted every is_latest row and only then
-          # inserted the new one. If that insert failed (network, schema, RLS)
-          # NO row was latest and the storefront /download page had nothing to
-          # serve, with no rollback and no check to notice. Inserting first
-          # means the worst case is two latest rows — which degrades to
-          # "serves one of two good builds" instead of "serves nothing".
-          curl -sf -X POST \
-            "$SUPABASE_URL/rest/v1/engine_releases" \
+          # Demote existing latest release first to respect unique index constraint
+          # (idx_engine_releases_latest enforces at most 1 row with is_latest = true).
+          curl -sf -X PATCH \
+            "$SUPABASE_URL/rest/v1/engine_releases?is_latest=eq.true" \
             -H "Authorization: Bearer $SERVICE_KEY" \
             -H "apikey: $SERVICE_KEY" \
             -H "Content-Type: application/json" \
+            -d '{"is_latest": false}' > /dev/null || true
+
+          # Upsert release row with is_latest = true. Using merge-duplicates ensures
+          # workflow re-runs or updates to an existing version succeed without 409 Conflict.
+          curl -sf -X POST \
+            "$SUPABASE_URL/rest/v1/engine_releases?on_conflict=version" \
+            -H "Authorization: Bearer $SERVICE_KEY" \
+            -H "apikey: $SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: resolution=merge-duplicates" \
             -d "{\"version\": \"$VERSION\", \"windows_url\": \"$WIN_DEST\", \"mac_url\": \"$MAC_DEST\", \"release_notes\": \"Novaframe Engine v$VERSION\", \"is_latest\": true}" > /dev/null
 
           # Checksums go in a SEPARATE, non-fatal call: the windows_sha256 /
@@ -127,12 +131,6 @@ jobs:
             -d "{\"windows_sha256\": \"$WIN_SHA\", \"mac_sha256\": \"$MAC_SHA\"}" \
             > /dev/null || echo "note: checksum columns not present yet — run the migration"
 
-          curl -sf -X PATCH \
-            "$SUPABASE_URL/rest/v1/engine_releases?is_latest=eq.true&version=neq.$VERSION" \
-            -H "Authorization: Bearer $SERVICE_KEY" \
-            -H "apikey: $SERVICE_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"is_latest": false}' > /dev/null
           echo "engine_releases updated to v$VERSION"
 
       - name: verify exactly one latest release
