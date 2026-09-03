@@ -258,7 +258,7 @@ pub(crate) async fn download_and_install_theme(
     wallpaper_title: Option<String>,
 ) -> Result<String, String> {
     if !is_allowed_download_url(&url) {
-        return Err(format!("Disallowed download URL host. Only trusted Novaframe and Supabase storage hosts permitted."));
+        return Err("Disallowed download URL host. Only trusted Novaframe and Supabase storage hosts permitted.".to_string());
     }
     use std::fs;
 
