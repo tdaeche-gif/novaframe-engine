@@ -236,13 +236,30 @@ pub fn get_themes_dir(app: tauri::AppHandle) -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
-#[tauri::command]
-pub async fn download_and_install_theme(
+pub fn is_allowed_download_url(url_str: &str) -> bool {
+    if let Ok(parsed) = reqwest::Url::parse(url_str) {
+        if parsed.scheme() != "https" {
+            return false;
+        }
+        if let Some(host) = parsed.host_str() {
+            return host == "api.novaframe.co.uk"
+                || host == "www.novaframe.co.uk"
+                || host.ends_with(".supabase.co")
+                || host.ends_with(".supabase.in");
+        }
+    }
+    false
+}
+
+pub(crate) async fn download_and_install_theme(
     app: tauri::AppHandle,
     url: String,
     theme_id: String,
     wallpaper_title: Option<String>,
 ) -> Result<String, String> {
+    if !is_allowed_download_url(&url) {
+        return Err(format!("Disallowed download URL host. Only trusted Novaframe and Supabase storage hosts permitted."));
+    }
     use std::fs;
 
     let app_data_dir = app
@@ -663,5 +680,17 @@ mod tests {
         assert!(staging.join("manifest.json").exists());
         assert!(!staging.parent().unwrap().join("escaped.txt").exists());
         assert!(!staging.join("../../escaped.txt").exists());
+    }
+
+    #[test]
+    fn validates_download_url_allowlist() {
+        use super::is_allowed_download_url;
+        assert!(is_allowed_download_url("https://api.novaframe.co.uk/file.zip"));
+        assert!(is_allowed_download_url("https://xyz.supabase.co/storage/v1/object/sign/wallpapers/theme.zip"));
+        assert!(is_allowed_download_url("https://xyz.supabase.in/storage/v1/object/sign/wallpapers/theme.zip"));
+        assert!(!is_allowed_download_url("http://api.novaframe.co.uk/file.zip"));
+        assert!(!is_allowed_download_url("https://evil.com/payload.zip"));
+        assert!(!is_allowed_download_url("https://supabase.co.attacker.com/file.zip"));
+        assert!(!is_allowed_download_url("javascript:alert(1)"));
     }
 }

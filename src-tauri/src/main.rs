@@ -961,7 +961,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![window::expand_settings_panel, window::collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, window::open_storefront_window, installer::download_and_install_theme, installer::handle_engine_apply, installer::check_theme_updates_rust, installer::get_themes_dir, system::get_hardware_id, set_autostart, get_autostart, power::get_wallpaper_paused, installer::delete_theme, power::set_battery_saver, deeplink::flush_pending_deeplink])
+        .invoke_handler(tauri::generate_handler![window::expand_settings_panel, window::collapse_settings_panel, set_settings_panel_locked, log_from_js, quit_engine, window::open_storefront_window, installer::handle_engine_apply, installer::check_theme_updates_rust, installer::get_themes_dir, system::get_hardware_id, set_autostart, get_autostart, power::get_wallpaper_paused, installer::delete_theme, power::set_battery_saver, deeplink::flush_pending_deeplink])
         .run(tauri::generate_context!())
         .expect("error while running Novaframe desktop runtime application");
 }

@@ -31,7 +31,7 @@ jobs:
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - name: install frontend dependencies
-        run: npm install
+        run: npm ci
       - name: build tauri app
         uses: tauri-apps/tauri-action@v0
         env:
