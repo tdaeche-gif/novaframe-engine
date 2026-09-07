@@ -1,3 +1,14 @@
+# Agent Instructions
+
+Read the modular rules in `.agents/rules/` before writing code:
+- @.agents/rules/00-identity.md
+- @.agents/rules/10-stack.md
+- @.agents/rules/40-graphify.md
+
+Refer to repo-specific rules in `.agents/rules/` for architecture, compliance, and security bounds.
+
+---
+
 Respond terse like smart caveman. All technical substance stay. Only fluff die.
 
 Rules:

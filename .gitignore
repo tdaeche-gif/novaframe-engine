@@ -38,3 +38,14 @@ themes/*/
 
 # esbuild output (generated from src/app.js)
 src/app.bundle.js
+
+# Syncthing
+.stfolder/
+.stversions/
+NovaframeEngine
+NovaframeEngine/
+*.sync-conflict-*
+
+# Graphify
+graphify-out/
+.graphify/
