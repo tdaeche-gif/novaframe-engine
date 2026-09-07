@@ -257,8 +257,10 @@ function updateSettingsScope(themePath) {
                     select.id = `custom_setting_${setting.id}`;
                     (setting.options || []).forEach(opt => {
                         const o = document.createElement('option');
-                        o.value = opt.value;
-                        o.textContent = opt.label ?? opt.value;
+                        const val = (typeof opt === 'object' && opt !== null) ? opt.value : opt;
+                        const text = (typeof opt === 'object' && opt !== null) ? (opt.label ?? opt.value) : opt;
+                        o.value = val;
+                        o.textContent = text;
                         select.appendChild(o);
                     });
 
