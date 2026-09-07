@@ -497,10 +497,13 @@ select option {
 }
 
 .theme-select-wrapper #themeSelector {
-    flex: 1 1 auto;
+    flex: 1 1 0%;
     width: 0 !important;
     min-width: 0;
     margin-bottom: 0 !important;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow: hidden;
 }
 
 .theme-action-btn {
@@ -524,16 +527,30 @@ select option {
     appearance: none;
 }
 
-.theme-action-btn:hover {
+.theme-action-btn:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.12);
     border-color: rgba(255, 255, 255, 0.25);
     color: #ffffff;
 }
 
-.theme-action-btn.btn-delete:hover {
+.theme-action-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.theme-action-btn.btn-delete:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.18);
     border-color: rgba(239, 68, 68, 0.45);
     color: #ef4444;
+}
+
+.theme-action-btn.spinning svg {
+    animation: themeSpin 0.8s linear infinite;
+}
+
+@keyframes themeSpin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
 }
 
 /* Range Slider */

@@ -420,13 +420,57 @@ async function initSettingsUI() {
         });
     }
 
+    const openFolderBtn = document.getElementById('openThemesFolderBtn');
+    if (openFolderBtn) {
+        openFolderBtn.addEventListener('click', async () => {
+            try {
+                await invoke('open_themes_folder');
+            } catch (err) {
+                console.error('[Novaframe] Failed to open themes folder:', err);
+            }
+        });
+    }
+
     const refreshBtn = document.getElementById('refreshThemeBtn');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', async () => {
-            try { await emit('theme-reload'); } catch (_) {
-                if (ThemeManager.currentThemePath) {
-                    ThemeManager.loadTheme(ThemeManager.currentThemePath, true);
+            if (refreshBtn.dataset.busy === 'true') return;
+            refreshBtn.dataset.busy = 'true';
+            refreshBtn.disabled = true;
+            refreshBtn.classList.add('spinning');
+            try {
+                // 1. Unpack any pending .zip files in themes/
+                let results = [];
+                try {
+                    results = await invoke('unpack_pending_themes');
+                } catch (err) {
+                    console.warn('[Novaframe] unpack_pending_themes failed or non-critical error:', err);
                 }
+
+                // 2. Rescan themes directory to populate dropdown
+                await scanThemes();
+
+                // 3. If a new theme was installed, auto-select and activate it via ConfigManager
+                const installed = Array.isArray(results) ? results.find(r => r.status === 'installed') : null;
+                if (installed && installed.theme_path) {
+                    console.log('[Novaframe] Newly installed theme activated:', installed.theme_path);
+                    await ConfigManager.setTheme(installed.theme_path);
+                    if (selector) {
+                        selector.value = installed.theme_path;
+                    }
+                    updateSettingsScope(installed.theme_path);
+                }
+
+                // 4. Signal main window to reload/apply wallpaper
+                try {
+                    await emit('theme-reload');
+                } catch (_) {}
+            } catch (e) {
+                console.error('[Novaframe] Refresh error:', e);
+            } finally {
+                refreshBtn.disabled = false;
+                delete refreshBtn.dataset.busy;
+                refreshBtn.classList.remove('spinning');
             }
         });
     }
@@ -634,8 +678,13 @@ async function scanThemes() {
         console.log("[Novaframe] Found entries:", entries);
         
         // Read all manifests in parallel — sequential awaits made panel-open
-        // latency scale linearly with installed theme count.
-        const themeDirs = entries.filter(entry => entry?.name && !entry.name.startsWith('.'));
+        // latency scale linearly with installed theme count. Skip hidden files and zip archives.
+        const themeDirs = entries.filter(entry => {
+            if (!entry?.name || entry.name.startsWith('.')) return false;
+            const lower = entry.name.toLowerCase();
+            if (lower.endsWith('.zip') || lower.endsWith('.zip.imported')) return false;
+            return true;
+        });
         if (themeDirs.length === 0 && entries.length > 0) {
             console.warn('[Novaframe] scanThemes: every entry was filtered out', entries);
         }

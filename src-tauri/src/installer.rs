@@ -529,6 +529,275 @@ pub fn delete_theme(app: tauri::AppHandle, name: String) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct ImportResult {
+    pub source: String,
+    pub status: String,
+    pub theme_path: Option<String>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub fn open_themes_folder(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let themes_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app_data_dir: {}", e))?
+        .join("themes");
+
+    if !themes_dir.exists() {
+        std::fs::create_dir_all(&themes_dir)
+            .map_err(|e| format!("Failed to create themes directory: {}", e))?;
+    }
+
+    let path_str = themes_dir.to_string_lossy().to_string();
+    app.opener()
+        .open_path(&path_str, None::<&str>)
+        .map_err(|e| format!("Failed to open themes folder: {}", e))?;
+
+    Ok(())
+}
+
+fn is_zip_extension(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+}
+
+#[tauri::command]
+pub async fn unpack_pending_themes(app: tauri::AppHandle) -> Result<Vec<ImportResult>, String> {
+    let themes_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app_data_dir: {}", e))?
+        .join("themes");
+
+    if !themes_dir.exists() {
+        let _ = std::fs::create_dir_all(&themes_dir);
+        return Ok(Vec::new());
+    }
+
+    let app_clone = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut results = Vec::new();
+        let read_dir = match std::fs::read_dir(&themes_dir) {
+            Ok(rd) => rd,
+            Err(e) => return Err(format!("Failed to read themes dir: {}", e)),
+        };
+
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if !path.is_file() || !is_zip_extension(&path) {
+                continue;
+            }
+
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown.zip")
+                .to_string();
+
+            // 1. Check file stability: exclusive write-lock check
+            let write_lock_ok = std::fs::OpenOptions::new().write(true).open(&path).is_ok();
+            if !write_lock_ok {
+                dlog(&app_clone, &format!("[import] file is locked (actively writing/copying): {:?}", path));
+                results.push(ImportResult {
+                    source: file_name,
+                    status: "busy".into(),
+                    theme_path: None,
+                    error: Some("File is actively being copied or locked".into()),
+                });
+                continue;
+            }
+
+            // Stat check: compare size & modified timestamp over short sleep to verify completion
+            if let Ok(meta1) = std::fs::metadata(&path) {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                if let Ok(meta2) = std::fs::metadata(&path) {
+                    if meta1.len() != meta2.len() || meta1.modified().ok() != meta2.modified().ok() {
+                        dlog(&app_clone, &format!("[import] file size/mtime changed (copy in flight): {:?}", path));
+                        results.push(ImportResult {
+                            source: file_name,
+                            status: "busy".into(),
+                            theme_path: None,
+                            error: Some("File is still in transit".into()),
+                        });
+                        continue;
+                    }
+                }
+            }
+
+            // 2. Atomic staging directory under themes_dir
+            let now_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let staging_name = format!(".tmp_unpack_{}_{}", std::process::id(), now_nanos);
+            let staging_dir = themes_dir.join(&staging_name);
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            let _staging_guard = TempDirGuard(staging_dir.clone());
+
+            // 3. Extract into staging_dir
+            if let Err(err) = extract_zip(&path, &staging_dir) {
+                dlog(&app_clone, &format!("[import] extraction failed for {:?}: {}", path, err));
+                results.push(ImportResult {
+                    source: file_name,
+                    status: "failed".into(),
+                    theme_path: None,
+                    error: Some(format!("Extraction failed: {}", err)),
+                });
+                continue; // Never delete original .zip on failure!
+            }
+
+            // 4. Validate manifest
+            let manifest_dir = match find_manifest_dir(&staging_dir) {
+                Some(dir) => dir,
+                None => {
+                    results.push(ImportResult {
+                        source: file_name,
+                        status: "failed".into(),
+                        theme_path: None,
+                        error: Some("Archive does not contain manifest.json".into()),
+                    });
+                    continue; // Never delete original .zip on failure!
+                }
+            };
+
+            if !manifest_dir.join("manifest.json").exists() && manifest_dir.join("engine_manifest.json").exists() {
+                let _ = std::fs::copy(manifest_dir.join("engine_manifest.json"), manifest_dir.join("manifest.json"));
+            }
+
+            let manifest_bytes = match std::fs::read(manifest_dir.join("manifest.json")) {
+                Ok(b) => b,
+                Err(err) => {
+                    results.push(ImportResult {
+                        source: file_name,
+                        status: "failed".into(),
+                        theme_path: None,
+                        error: Some(format!("Unreadable manifest.json: {}", err)),
+                    });
+                    continue;
+                }
+            };
+
+            let manifest_json: serde_json::Value = match serde_json::from_slice(&manifest_bytes) {
+                Ok(j) => j,
+                Err(err) => {
+                    results.push(ImportResult {
+                        source: file_name,
+                        status: "failed".into(),
+                        theme_path: None,
+                        error: Some(format!("Invalid manifest.json JSON: {}", err)),
+                    });
+                    continue;
+                }
+            };
+
+            let entry_file = manifest_json
+                .get("entry")
+                .and_then(|v| v.as_str())
+                .unwrap_or("index.html");
+
+            if entry_file.contains("..") || entry_file.starts_with('/') || entry_file.starts_with('\\') {
+                results.push(ImportResult {
+                    source: file_name,
+                    status: "failed".into(),
+                    theme_path: None,
+                    error: Some("Unsafe entry path in manifest".into()),
+                });
+                continue;
+            }
+
+            if !manifest_dir.join(entry_file).exists() {
+                results.push(ImportResult {
+                    source: file_name,
+                    status: "failed".into(),
+                    theme_path: None,
+                    error: Some(format!("Entry file '{}' not found in theme", entry_file)),
+                });
+                continue;
+            }
+
+            // 5. Destination name & collision policy
+            let theme_title = manifest_json
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let mut slug = theme_title
+                .as_deref()
+                .map(slugify_title)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(slugify_title)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| format!("theme-{}", now_nanos % 1_000_000))
+                });
+
+            if !is_safe_theme_name(&slug) {
+                slug = format!("imported-{}", now_nanos % 1_000_000);
+            }
+
+            let mut final_dir = themes_dir.join(&slug);
+            if final_dir.exists() {
+                let mut counter = 2;
+                loop {
+                    let candidate = format!("{}-{}", slug, counter);
+                    let candidate_dir = themes_dir.join(&candidate);
+                    if !candidate_dir.exists() {
+                        slug = candidate;
+                        final_dir = candidate_dir;
+                        break;
+                    }
+                    counter += 1;
+                }
+            }
+
+            // 6. Move manifest_dir to final_dir
+            let move_res = if manifest_dir == staging_dir {
+                std::fs::rename(&staging_dir, &final_dir)
+            } else {
+                let r = std::fs::rename(&manifest_dir, &final_dir);
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                r
+            };
+
+            if let Err(err) = move_res {
+                results.push(ImportResult {
+                    source: file_name,
+                    status: "failed".into(),
+                    theme_path: None,
+                    error: Some(format!("Failed moving to final destination: {}", err)),
+                });
+                continue;
+            }
+
+            // 7. Source ZIP cleanup (only after 100% successful install)
+            if let Err(del_err) = std::fs::remove_file(&path) {
+                dlog(&app_clone, &format!("[import] could not delete zip ({}), renaming to .imported", del_err));
+                let imported_name = path.with_extension("zip.imported");
+                let _ = std::fs::rename(&path, &imported_name);
+            }
+
+            dlog(&app_clone, &format!("[import] installed theme {:?} to {:?}", file_name, final_dir));
+            results.push(ImportResult {
+                source: file_name,
+                status: "installed".into(),
+                theme_path: Some(final_dir.to_string_lossy().to_string()),
+                error: None,
+            });
+        }
+
+        Ok(results)
+    })
+    .await
+    .map_err(|e| format!("Task execution failed: {}", e))?
+}
+
 fn slugify_title(s: &str) -> String {
     let mut out = String::new();
     let mut last_was_dash = false;
@@ -692,5 +961,16 @@ mod tests {
         assert!(!is_allowed_download_url("https://evil.com/payload.zip"));
         assert!(!is_allowed_download_url("https://supabase.co.attacker.com/file.zip"));
         assert!(!is_allowed_download_url("javascript:alert(1)"));
+    }
+
+    #[test]
+    fn test_is_zip_extension() {
+        use super::is_zip_extension;
+        assert!(is_zip_extension(std::path::Path::new("test.zip")));
+        assert!(is_zip_extension(std::path::Path::new("test.ZIP")));
+        assert!(is_zip_extension(std::path::Path::new("/path/to/theme.Zip")));
+        assert!(!is_zip_extension(std::path::Path::new("test.zip.imported")));
+        assert!(!is_zip_extension(std::path::Path::new("test.tar.gz")));
+        assert!(!is_zip_extension(std::path::Path::new("test")));
     }
 }
