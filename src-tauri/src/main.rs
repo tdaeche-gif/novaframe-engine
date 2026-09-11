@@ -13,6 +13,7 @@ use state::*;
 use tauri::Manager;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_desktop_underlay::DesktopUnderlayExt;
+use tauri_plugin_opener::OpenerExt;
 
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSPoint, NSRect};
@@ -119,9 +120,45 @@ fn provision_default_theme(app: &tauri::AppHandle) {
     // launch rather than leaving a broken theme the user can select.
     let _ = std::fs::write(&marker, b"1");
     dlog(app, &format!("[default-theme] provisioned {:?}", dest_dir));
+    ping_first_run_and_open_welcome(app.clone());
 }
 
-/// Hard ceiling on engine-debug.log before it is rotated to `.old`. Two files at
+fn ping_first_run_and_open_welcome(app: tauri::AppHandle) {
+    let welcome_url = "https://www.novaframe.co.uk/welcome?installed=1";
+    let hardware_id = machine_uid::get().unwrap_or_else(|_| "unknown-device".to_string());
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let os = std::env::consts::OS.to_string();
+
+    // This is intentionally detached from startup. A captive portal, offline
+    // launch, or slow PostHog/API response must never delay the wallpaper.
+    tauri::async_runtime::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+        {
+            Ok(client) => client,
+            Err(_) => return,
+        };
+
+        let _ = client
+            .post("https://api.novaframe.co.uk/api/engine/ping")
+            .json(&serde_json::json!({
+                "hardware_id": hardware_id,
+                "os": os,
+                "version": version,
+                "first_run": true,
+            }))
+            .send()
+            .await;
+    });
+
+    // Use the already-installed Tauri opener plugin instead of introducing a
+    // second URL-opening dependency. The browser handoff is best effort and
+    // only happens after the marker is written, so restart cannot duplicate it.
+    let _ = app.opener().open_url(welcome_url, None::<&str>);
+}
+
 /// this size cap total on-disk logging at ~4 MB.
 ///
 /// Without a cap this file grew forever: it is appended on every startup, layout
