@@ -124,8 +124,20 @@ fn provision_default_theme(app: &tauri::AppHandle) {
 }
 
 fn ping_first_run_and_open_welcome(app: tauri::AppHandle) {
-    let welcome_url = "https://www.novaframe.co.uk/welcome?installed=1";
-    let hardware_id = machine_uid::get().unwrap_or_else(|_| "unknown-device".to_string());
+    let hardware_id_opt = machine_uid::get()
+        .ok()
+        .map(|id| id.trim_matches(|c: char| c == '"' || c == '\'').trim().to_string())
+        .filter(|id| !id.is_empty() && !id.eq_ignore_ascii_case("unknown-device"));
+
+    let welcome_url = match &hardware_id_opt {
+        Some(id) => format!(
+            "https://www.novaframe.co.uk/welcome?installed=1&device_id={}",
+            urlencoding::encode(id)
+        ),
+        None => "https://www.novaframe.co.uk/welcome?installed=1".to_string(),
+    };
+
+    let hardware_id = hardware_id_opt.unwrap_or_else(|| "unknown-device".to_string());
     let version = env!("CARGO_PKG_VERSION").to_string();
     let os = std::env::consts::OS.to_string();
 
@@ -156,7 +168,9 @@ fn ping_first_run_and_open_welcome(app: tauri::AppHandle) {
     // Use the already-installed Tauri opener plugin instead of introducing a
     // second URL-opening dependency. The browser handoff is best effort and
     // only happens after the marker is written, so restart cannot duplicate it.
-    let _ = app.opener().open_url(welcome_url, None::<&str>);
+    if let Err(e) = app.opener().open_url(&welcome_url, None::<&str>) {
+        dlog(&app, &format!("[first-run] failed to open welcome URL: {}", e));
+    }
 }
 
 /// this size cap total on-disk logging at ~4 MB.
