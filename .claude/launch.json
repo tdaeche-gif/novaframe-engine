@@ -4,7 +4,7 @@
     {
       "name": "novaframe-src",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "4173", "--directory", "/Users/tdaeche/NovaframeEngine/src"],
+      "runtimeArgs": ["-m", "http.server", "4173", "--directory", "/Users/tdaeche/Projects/NovaframeEngine/src"],
       "port": 4173
     }
   ]

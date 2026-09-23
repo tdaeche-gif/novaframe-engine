@@ -129,13 +129,8 @@ fn ping_first_run_and_open_welcome(app: tauri::AppHandle) {
         .map(|id| id.trim_matches(|c: char| c == '"' || c == '\'').trim().to_string())
         .filter(|id| !id.is_empty() && !id.eq_ignore_ascii_case("unknown-device"));
 
-    let welcome_url = match &hardware_id_opt {
-        Some(id) => format!(
-            "https://www.novaframe.co.uk/welcome?installed=1&device_id={}",
-            urlencoding::encode(id)
-        ),
-        None => "https://www.novaframe.co.uk/welcome?installed=1".to_string(),
-    };
+    // Do not leak raw hardware_id into browser history, edge logs, and referrer headers
+    let welcome_url = "https://www.novaframe.co.uk/welcome?installed=1".to_string();
 
     let hardware_id = hardware_id_opt.unwrap_or_else(|| "unknown-device".to_string());
     let version = env!("CARGO_PKG_VERSION").to_string();
