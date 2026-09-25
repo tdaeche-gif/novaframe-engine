@@ -42,6 +42,7 @@ src/app.bundle.js
 # Syncthing
 .stfolder/
 .stversions/
+.stignore
 NovaframeEngine
 NovaframeEngine/
 *.sync-conflict-*
